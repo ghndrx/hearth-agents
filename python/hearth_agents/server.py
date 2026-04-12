@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +16,9 @@ from fastapi import FastAPI, HTTPException, Request
 from .backlog import Backlog
 from .config import settings
 from .cost_tracker import CostTracker
+
+# Valid feature_id pattern: alphanumeric, hyphens, and underscores only
+VALID_FEATURE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def build_app(backlog: Backlog, agent: Any, cost_tracker: CostTracker | None = None) -> FastAPI:
@@ -55,11 +59,20 @@ def build_app(backlog: Backlog, agent: Any, cost_tracker: CostTracker | None = N
             raise HTTPException(status_code=503, detail="cost tracking not configured")
         return {"costs": cost_tracker.get_all_costs()}
 
+    def _validate_feature_id(feature_id: str) -> None:
+        """Validate feature_id format to prevent injection attacks (CWE-20)."""
+        if not VALID_FEATURE_ID_PATTERN.match(feature_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid feature_id '{feature_id}': must contain only alphanumeric characters, hyphens, and underscores",
+            )
+
     @app.get("/costs/{feature_id}")
     async def get_feature_cost(feature_id: str) -> dict[str, Any]:
         """Get cost summary for a specific feature."""
         if cost_tracker is None:
             raise HTTPException(status_code=503, detail="cost tracking not configured")
+        _validate_feature_id(feature_id)
         return cost_tracker.get_feature_cost(feature_id)
 
     @app.delete("/costs/{feature_id}")
@@ -67,6 +80,7 @@ def build_app(backlog: Backlog, agent: Any, cost_tracker: CostTracker | None = N
         """Reset costs for a specific feature."""
         if cost_tracker is None:
             raise HTTPException(status_code=503, detail="cost tracking not configured")
+        _validate_feature_id(feature_id)
         was_reset = await cost_tracker.reset_feature(feature_id)
         if not was_reset:
             raise HTTPException(status_code=404, detail=f"feature '{feature_id}' not found")

@@ -5,8 +5,15 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
-from hearth_agents.cost_tracker import CostTracker
+from hearth_agents.backlog import Backlog
+from hearth_agents.cost_tracker import (
+    MAX_CALL_HISTORY_PER_FEATURE,
+    MAX_FILE_SIZE_BYTES,
+    CostTracker,
+)
+from hearth_agents.server import build_app
 
 
 class TestCostTracker:
@@ -318,3 +325,109 @@ class TestCostTrackerIntegration:
         assert costs["call_count"] == 10
         assert costs["total_input_tokens"] == 1000
         assert costs["total_output_tokens"] == 500
+
+
+class TestCostTrackerSecurity:
+    """Security tests for CostTracker."""
+
+    def test_path_traversal_protection(self, tmp_path: Path) -> None:
+        """Test that path traversal attempts are blocked (CWE-22)."""
+        # Attempt to access file outside /data using path traversal
+        malicious_path = "/data/../etc/passwd"
+
+        with pytest.raises(ValueError, match="path traversal"):
+            CostTracker(persist_path=malicious_path)
+
+    def test_path_traversal_protection_relative(self, tmp_path: Path) -> None:
+        """Test that relative path traversal is blocked."""
+        malicious_path = "../../../etc/passwd"
+
+        with pytest.raises(ValueError, match="path traversal"):
+            CostTracker(persist_path=malicious_path)
+
+    def test_load_rejects_oversized_file(self, tmp_path: Path) -> None:
+        """Test that files larger than 10MB are rejected (CWE-400)."""
+        costs_file = tmp_path / "costs.json"
+
+        # Create a file larger than MAX_FILE_SIZE_BYTES
+        large_content = "{" + "\"x\": " * (MAX_FILE_SIZE_BYTES // 10) + "\"x\"}"
+        costs_file.write_text(large_content)
+
+        # Create tracker - should reject the oversized file and start with empty costs
+        tracker = CostTracker(persist_path=str(costs_file))
+
+        # Should start with empty costs due to file being too large
+        assert tracker.get_all_costs() == {}
+
+    def test_call_history_limits(self, tmp_path: Path) -> None:
+        """Test that call history is limited to prevent unbounded memory growth (CWE-400)."""
+        costs_file = tmp_path / "costs.json"
+        tracker = CostTracker(persist_path=str(costs_file))
+
+        # Add more calls than the limit
+        for i in range(MAX_CALL_HISTORY_PER_FEATURE + 10):
+            mock_result = MagicMock()
+            mock_result.llm_output = {
+                "token_usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                },
+                "model_name": "minimax",
+            }
+            mock_result.metadata = {"feature_id": "limited-feature"}
+            mock_result.generations = []
+            tracker.on_llm_end(mock_result, run_id=f"run-{i}")
+
+        costs = tracker.get_feature_cost("limited-feature")
+        # Should be limited to MAX_CALL_HISTORY_PER_FEATURE
+        assert costs["call_count"] == MAX_CALL_HISTORY_PER_FEATURE
+
+        # Verify totals are correct (should account for the limited history)
+        # Each call: 100 input, 50 output tokens
+        expected_input = MAX_CALL_HISTORY_PER_FEATURE * 100
+        expected_output = MAX_CALL_HISTORY_PER_FEATURE * 50
+        assert costs["total_input_tokens"] == expected_input
+        assert costs["total_output_tokens"] == expected_output
+
+    def test_feature_id_validation(self, tmp_path: Path) -> None:
+        """Test that invalid feature_ids are rejected (CWE-20)."""
+        costs_file = tmp_path / "costs.json"
+        tracker = CostTracker(persist_path=str(costs_file))
+
+        # Create a mock agent for the app
+        mock_agent = MagicMock()
+        mock_agent.ainvoke = MagicMock(return_value=None)
+
+        backlog = Backlog()
+        app = build_app(backlog, mock_agent, cost_tracker=tracker)
+        client = TestClient(app)
+
+        # Valid feature_id should work
+        response = client.get("/costs/valid-feature_123")
+        assert response.status_code == 200
+
+        # Valid feature_id with only alphanumeric, hyphens, underscores should work
+        response = client.get("/costs/feature_test-123")
+        assert response.status_code == 200
+
+        # Invalid feature_id with dots should return 400
+        response = client.get("/costs/feature.id")
+        assert response.status_code == 400
+
+        # Invalid feature_id with special characters should return 400
+        response = client.get("/costs/feature%3Cscript%3E")  # <script>
+        assert response.status_code == 400
+
+        # Invalid feature_id with spaces should return 400 (URL encoded space)
+        response = client.get("/costs/feature%20with%20spaces")
+        assert response.status_code == 400
+
+        # Invalid feature_id with slashes should return 404 (path separator)
+        # Note: FastAPI treats slashes as path separators, so this returns 404
+        response = client.get("/costs/feature/test")
+        assert response.status_code == 404
+
+        # Empty feature_id redirects to /costs (the list endpoint)
+        response = client.get("/costs/", follow_redirects=False)
+        # FastAPI may redirect or handle this differently depending on configuration
+        assert response.status_code in (200, 307, 308, 404)

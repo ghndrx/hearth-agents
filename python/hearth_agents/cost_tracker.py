@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,11 @@ MINIMAX_INPUT_PRICE = 0.15
 MINIMAX_OUTPUT_PRICE = 0.60
 KIMI_INPUT_PRICE = 3.00
 KIMI_OUTPUT_PRICE = 12.00
+
+# Security limits
+MAX_CALL_HISTORY_PER_FEATURE = 1000
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
+VALID_FEATURE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass
@@ -48,8 +54,19 @@ class FeatureCosts:
     total_cost_usd: float = 0.0
 
     def add_call(self, record: CostRecord) -> None:
-        """Add a cost record and update totals."""
+        """Add a cost record and update totals.
+
+        Limits call history to MAX_CALL_HISTORY_PER_FEATURE to prevent
+        unbounded memory growth (CWE-400).
+        """
         self.calls.append(record)
+        # Limit call history to prevent unbounded memory growth
+        if len(self.calls) > MAX_CALL_HISTORY_PER_FEATURE:
+            removed = self.calls.pop(0)
+            # Adjust totals to account for removed record
+            self.total_input_tokens -= removed.input_tokens
+            self.total_output_tokens -= removed.output_tokens
+            self.total_cost_usd -= removed.cost_usd
         self.total_input_tokens += record.input_tokens
         self.total_output_tokens += record.output_tokens
         self.total_cost_usd += record.cost_usd
@@ -67,9 +84,21 @@ class CostTracker(BaseCallbackHandler):
 
         Args:
             persist_path: Path to JSON file for persistence. Defaults to settings.costs_path.
+
+        Raises:
+            ValueError: If persist_path contains path traversal sequences.
         """
         super().__init__()
-        self._path = Path(persist_path) if persist_path else Path(settings.costs_path)
+        raw_path = Path(persist_path) if persist_path else Path(settings.costs_path)
+        # Resolve path and validate no path traversal (CWE-22)
+        resolved_path = raw_path.resolve()
+        # Check for path traversal by ensuring the resolved path's parent exists and is valid
+        # For security, we check that the path doesn't contain parent directory references
+        # that would escape the intended directory
+        if ".." in str(raw_path):
+            log.error("cost_tracker.path_traversal_blocked", path=str(raw_path))
+            raise ValueError("Cost file path cannot contain '..' (path traversal)")
+        self._path = resolved_path
         self._costs: dict[str, FeatureCosts] = {}
         self._lock = asyncio.Lock()
         self._load()
@@ -78,6 +107,18 @@ class CostTracker(BaseCallbackHandler):
         """Load existing cost data from disk."""
         if not self._path.exists():
             log.info("cost_tracker.no_existing_data", path=str(self._path))
+            return
+
+        # Check file size before reading to prevent unbounded file read (CWE-400)
+        file_size = self._path.stat().st_size
+        if file_size > MAX_FILE_SIZE_BYTES:
+            log.error(
+                "cost_tracker.file_too_large",
+                path=str(self._path),
+                size=file_size,
+                max_size=MAX_FILE_SIZE_BYTES,
+            )
+            self._costs = {}
             return
 
         try:
