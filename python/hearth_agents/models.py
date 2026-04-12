@@ -5,13 +5,18 @@ The Kimi coding endpoint requires a ``claude-code/1.0.0`` user-agent header — 
 quirk tripped us up in the TypeScript version.
 """
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_openai import ChatOpenAI
 
 from .config import settings
 
 
-def build_minimax() -> ChatOpenAI:
-    """MiniMax M2.7: 205K context, cheap, strong at planning and decomposition."""
+def build_minimax(callbacks: list[BaseCallbackHandler] | None = None) -> ChatOpenAI:
+    """MiniMax M2.7: 205K context, cheap, strong at planning and decomposition.
+
+    Args:
+        callbacks: Optional list of LangChain callback handlers for tracking/logging.
+    """
     if not settings.minimax_api_key:
         raise RuntimeError("MINIMAX_API_KEY is required")
     return ChatOpenAI(
@@ -21,14 +26,18 @@ def build_minimax() -> ChatOpenAI:
         temperature=0.3,
         max_retries=3,
         timeout=180,
+        callbacks=callbacks,
     )
 
 
-def build_kimi() -> ChatOpenAI:
+def build_kimi(callbacks: list[BaseCallbackHandler] | None = None) -> ChatOpenAI:
     """Kimi K2.5: 76.8% SWE-Bench, best-in-class for code generation.
 
     ``sk-kimi-`` prefixed keys hit the coding endpoint which enforces a coding-agent
     user-agent (learned from upstream GitHub issues — see docs/README).
+
+    Args:
+        callbacks: Optional list of LangChain callback handlers for tracking/logging.
     """
     if not settings.kimi_api_key:
         raise RuntimeError("KIMI_API_KEY is required")
@@ -45,4 +54,5 @@ def build_kimi() -> ChatOpenAI:
         max_retries=3,
         timeout=180,
         default_headers=default_headers or None,
+        callbacks=callbacks,
     )

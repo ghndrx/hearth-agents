@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 
     # Persistence
     backlog_path: str = "/data/backlog.json"
+    costs_path: str = "/data/costs.json"
 
     @property
     def allowed_chat_ids(self) -> set[int]:

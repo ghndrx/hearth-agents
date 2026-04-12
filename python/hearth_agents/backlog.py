@@ -5,12 +5,11 @@ This is a Python port of the TypeScript backlog. The loop pulls the next
 when its subagents finish implementation.
 """
 
+import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-
-import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
@@ -27,7 +26,7 @@ class Feature:
     research_topics: list[str] = field(default_factory=list)
     discord_parity: str = ""
     status: Status = "pending"
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 # Initial backlog. The idea engine appends to this over time.

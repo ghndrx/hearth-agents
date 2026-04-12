@@ -14,10 +14,10 @@ from fastapi import FastAPI, HTTPException, Request
 
 from .backlog import Backlog
 from .config import settings
-from .logger import log
+from .cost_tracker import CostTracker
 
 
-def build_app(backlog: Backlog, agent: Any) -> FastAPI:
+def build_app(backlog: Backlog, agent: Any, cost_tracker: CostTracker | None = None) -> FastAPI:
     """Construct the FastAPI app with shared backlog + agent state."""
     app = FastAPI(title="hearth-agents", version="0.2.0")
 
@@ -46,6 +46,31 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                     {"messages": [{"role": "user", "content": f"GitHub {event} on {repo}: {body}"}]}
                 )
         return {"ok": True}
+
+    # Cost tracking endpoints
+    @app.get("/costs")
+    async def get_all_costs() -> dict[str, Any]:
+        """Get all tracked costs for all features."""
+        if cost_tracker is None:
+            raise HTTPException(status_code=503, detail="cost tracking not configured")
+        return {"costs": cost_tracker.get_all_costs()}
+
+    @app.get("/costs/{feature_id}")
+    async def get_feature_cost(feature_id: str) -> dict[str, Any]:
+        """Get cost summary for a specific feature."""
+        if cost_tracker is None:
+            raise HTTPException(status_code=503, detail="cost tracking not configured")
+        return cost_tracker.get_feature_cost(feature_id)
+
+    @app.delete("/costs/{feature_id}")
+    async def reset_feature_cost(feature_id: str) -> dict[str, Any]:
+        """Reset costs for a specific feature."""
+        if cost_tracker is None:
+            raise HTTPException(status_code=503, detail="cost tracking not configured")
+        was_reset = await cost_tracker.reset_feature(feature_id)
+        if not was_reset:
+            raise HTTPException(status_code=404, detail=f"feature '{feature_id}' not found")
+        return {"ok": True, "feature_id": feature_id, "message": "costs reset"}
 
     return app
 
