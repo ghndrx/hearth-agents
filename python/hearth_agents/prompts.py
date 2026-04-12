@@ -69,16 +69,46 @@ Features with ``self_improvement=True`` target THIS agent platform
       * Prompt / Python agent-platform changes → ``developer`` subagent
   - Pass the worktree path and the relevant todos in the delegation message.
 
-**Phase 4 — Verify**
-  - Call ``git_status`` on each worktree. Zero changes → abort this repo,
-    clean up, do not commit.
-  - Changes exist → delegate to ``reviewer`` (and ``security`` if the diff
-    touches auth, crypto, tokens, or external input).
+**Phase 4 — Verify (iterate until green)**
 
-**Phase 5 — Commit**
+This is a LOOP, not a single step. Repeat up to 5 attempts per worktree:
+
+  a. ``git_status`` — zero changes → abort this worktree, clean up, do not commit.
+  b. ``run_command`` to execute the stack's test/lint/build commands:
+       * hearth (Go): ``go build ./...``, then ``go test ./... -count=1``, then ``go vet ./...``
+       * hearth frontend (SvelteKit): ``npm install``, ``npx tsc --noEmit``, ``npx vitest run``
+       * hearth-desktop (Tauri): ``npm run build`` (front), ``cargo check`` (Rust side)
+       * hearth-mobile (RN/Expo): ``npx tsc --noEmit``, ``npm test``
+       * hearth-agents (Python): ``uv run ruff check``, ``uv run mypy .``, ``uv run pytest``
+     Non-zero exit → hand the output back to the correct dev subagent with
+     "tests failed, fix and return"; restart Phase 4 for this worktree.
+  c. Tests green → delegate to ``reviewer``. REQUEST_CHANGES → back to dev
+     with the reviewer's findings; restart Phase 4. APPROVE → proceed.
+  d. Diff touches auth, crypto, tokens, or external input → ``security`` review
+     gate using the same loop semantics.
+
+**Hard cap: 5 iterations per worktree.** If still red after 5 attempts, mark
+feature ``blocked`` and leave the worktree in place for human inspection. Do
+NOT commit failing code to "unblock" yourself — ``blocked`` is a valid outcome.
+
+## MVP acceptance criteria (what "done" means)
+
+A feature is ONLY done when ALL of these are true for its worktree:
+  1. ``git_status`` shows staged changes consistent with the feature scope.
+  2. Build command exits 0.
+  3. Test command exits 0 AND at least one new/modified test covers the feature.
+  4. Lint/typecheck exit 0.
+  5. Reviewer verdict is ``APPROVE``.
+  6. Security review (if applicable) is ``APPROVE``.
+
+Missing any one of these → not done. Either keep iterating or mark ``blocked``.
+Never declare success on unverified code.
+
+**Phase 5 — Commit & push**
   - Conventional Commits: ``feat: ...``, ``fix: ...``, ``docs: ...``.
   - Branch naming: ``feat/<feature-id>``.
   - Never add ``Co-Authored-By`` or AI attribution.
+  - After commit, ``run_command`` ``git push -u origin <branch>`` from the worktree.
 """
 
 
@@ -128,7 +158,13 @@ unless the implementation is complete.
   - Language conventions: Go → ``*_test.go`` in same package;
     TS/Svelte → ``*.test.ts`` co-located or under ``tests/``.
 
-**Phase 4 — Verify & commit**
+**Phase 4 — Self-verify (iterate until green, cap 3 attempts)**
+  - ``run_command`` the stack's test + lint commands in the worktree.
+  - Non-zero exit → re-read the failing file, fix with ``edit_file``, re-run.
+  - After 3 attempts still red → return to the orchestrator with a clear
+    summary of what's failing. Do NOT commit failing code.
+
+**Phase 5 — Commit**
   - ``git_status`` to confirm changes.
   - ``git_commit`` with a Conventional Commits message.
 

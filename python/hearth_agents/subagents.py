@@ -20,6 +20,7 @@ from .prompts import (
 from .tools import (
     git_commit,
     git_status,
+    run_command,
     web_search,
     wikidelve_read,
     wikidelve_search,
@@ -28,8 +29,8 @@ from .tools import (
 
 def build_subagents() -> list[dict[str, Any]]:
     """Return the SubAgent specs expected by ``create_deep_agent``."""
-    dev_tools = [wikidelve_search, wikidelve_read, web_search, git_status, git_commit]
-    review_tools = [git_status, wikidelve_search, wikidelve_read]
+    dev_tools = [wikidelve_search, wikidelve_read, web_search, run_command, git_status, git_commit]
+    review_tools = [git_status, run_command, wikidelve_search, wikidelve_read]
 
     return [
         {
