@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+*.db
+*.sqlite
+.DS_Store
+.claude/worktrees/
+logs/
+knowledge/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

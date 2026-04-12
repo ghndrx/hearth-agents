@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.env
+*.db
+*.sqlite
+logs
+knowledge
+.claude
+.github
+blog-autonomous-dev-team.md
+README.md
+*.log
+.DS_Store
+.vscode
+.idea

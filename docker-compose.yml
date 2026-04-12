@@ -1,0 +1,26 @@
+services:
+  agent:
+    build: ./python
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BACKLOG_PATH: /data/backlog.json
+      HEARTH_REPO_PATH: /repos/hearth
+      HEARTH_DESKTOP_PATH: /repos/hearth-desktop
+      HEARTH_MOBILE_PATH: /repos/hearth-mobile
+    volumes:
+      - agent-data:/data
+      - ${REPOS_DIR:-./repos}:/repos
+      - ./logs:/app/logs
+    ports:
+      # Only exposed for the GitHub webhook receiver. Telegram uses long-poll,
+      # so no public ingress is required for the bot itself.
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  agent-data:
