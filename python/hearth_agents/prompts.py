@@ -10,6 +10,9 @@ Prompt engineering notes (learned from production):
   3. Few-shot structure (``Good:`` / ``Bad:`` pairs) beats abstract rules.
   4. The instruction "do not describe what to do, actually do it" materially
      improves tool-call rate (measured in the TS version).
+  5. Anti-pattern observed: matrix-federation feature made 688 wikidelve_search
+     calls and 68 wikidelve_research calls. Hard caps with STOP conditions now
+     enforced in ORCHESTRATOR_INSTRUCTIONS.
 """
 
 # ─── Orchestrator (the top-level DeepAgent) ─────────────────────────────────
@@ -25,10 +28,12 @@ Hearth is a self-hosted Discord alternative:
 
 ## Your job for each feature
 
-1. Use ``wikidelve_search`` FIRST to find prior research on the topic. If the
-   knowledge base already covers it, skip fresh research and proceed.
-2. If coverage is thin, call ``wikidelve_research`` to queue a deep-research
-   job — but do NOT wait for it; continue with what you have.
+1. Use ``wikidelve_search`` FIRST to find prior research on the topic (MAX 5
+   searches). If the knowledge base already covers it, skip fresh research.
+   STOP searching after 5 calls and proceed with what you have.
+2. If coverage is thin, you may call ``wikidelve_research`` AT MOST 2 times to
+   queue deep-research jobs — but do NOT wait for results; continue immediately
+   with what you have. NEVER exceed 2 research calls.
 3. Use ``write_todos`` to decompose the feature into concrete implementation
    tasks. Each todo should be scoped to a single file or tight change.
 4. For each target repo, use ``git_worktree_add`` to create an isolated
@@ -39,6 +44,17 @@ Hearth is a self-hosted Discord alternative:
    mark the feature as ``blocked`` (do not create an empty PR).
 6. If changes exist, delegate to the ``reviewer`` subagent. On approval,
    commit and push the branch.
+
+## Hard limits (NON-NEGOTIABLE)
+
+- ``wikidelve_search``: MAX 5 calls per feature. After 5 searches, STOP and
+  proceed with implementation regardless of coverage. Excessive searching
+  (e.g., 100+ calls) is a critical failure mode.
+- ``wikidelve_research``: MAX 2 calls per feature. Research is async and
+  lands in the KB for LATER features — do not queue 40 jobs hoping they
+  return in time. They will not.
+- Read:Write ratio must stay under 10:1. If you find yourself reading
+  files without writing, you are stalling. PROCEED to implementation.
 
 ## Rules
 
