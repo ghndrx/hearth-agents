@@ -1,0 +1,38 @@
+{
+  "name": "hearth-agents",
+  "version": "0.1.0",
+  "description": "Multi-agent development orchestration for Hearth",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "bot": "tsx watch src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "orchestrate": "tsx src/orchestrator.ts",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop hearth-agents",
+    "pm2:logs": "pm2 logs hearth-agents",
+    "pm2:status": "pm2 status"
+  },
+  "keywords": [
+    "agents",
+    "claude",
+    "minimax",
+    "telegram",
+    "hearth"
+  ],
+  "author": "Greg",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^17.4.1",
+    "grammy": "^1.42.0",
+    "openai": "^6.34.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
