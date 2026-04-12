@@ -108,13 +108,25 @@ DAILY_BUDGET_USD       # Daily spend cap (default: 5.0)
 ## Production
 
 ```bash
-# PM2
-npm run pm2:start
+# Build and run with Docker Compose
+npm run docker:build
+npm run docker:up
 
-# systemd
-sudo cp deploy/hearth-agents.service /etc/systemd/system/
-sudo systemctl enable --now hearth-agents
+# View logs
+npm run docker:logs
+
+# Restart
+npm run docker:restart
+
+# Stop
+npm run docker:down
 ```
+
+The container mounts the target repos (`hearth`, `hearth-desktop`, `hearth-mobile`) as read-write volumes so agents can commit to them. Git config and gh CLI auth are mounted read-only from the host.
+
+Ports exposed:
+- `9090` — Prometheus metrics
+- `9091` — GitHub webhooks
 
 ## Target Repositories
 

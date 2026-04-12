@@ -1,0 +1,43 @@
+services:
+  hearth-agents:
+    build: .
+    image: hearth-agents:latest
+    container_name: hearth-agents
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persistent data: SQLite DB, logs, knowledge base
+      - agent-data:/data
+      - ./logs:/app/logs
+      # Mount target repos so agents can work on them
+      - ../hearth:/repos/hearth
+      - ../hearth-desktop:/repos/hearth-desktop
+      - ../hearth-mobile:/repos/hearth-mobile
+      # Git config for commits
+      - ~/.gitconfig:/home/agent/.gitconfig:ro
+      # gh CLI auth
+      - ~/.config/gh:/home/agent/.config/gh:ro
+    environment:
+      - HEARTH_REPO_PATH=/repos/hearth
+      - HEARTH_DESKTOP_PATH=/repos/hearth-desktop
+      - HEARTH_MOBILE_PATH=/repos/hearth-mobile
+      - DB_PATH=/data/hearth-agents.db
+    ports:
+      - "9090:9090"  # Prometheus metrics
+      - "9091:9091"  # GitHub webhooks
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  agent-data:
+    driver: local

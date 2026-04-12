@@ -9,10 +9,12 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "orchestrate": "tsx src/orchestrator.ts",
-    "pm2:start": "pm2 start ecosystem.config.cjs",
-    "pm2:stop": "pm2 stop hearth-agents",
-    "pm2:logs": "pm2 logs hearth-agents",
-    "pm2:status": "pm2 status"
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f hearth-agents",
+    "docker:restart": "docker compose restart hearth-agents",
+    "docker:shell": "docker compose exec hearth-agents sh"
   },
   "keywords": [
     "agents",
