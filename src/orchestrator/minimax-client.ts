@@ -149,14 +149,14 @@ async function chat(
 
   try {
     const result = await executeWithRetry(config, body);
-    concurrencyLimiter.release();
     log.apiCall('minimax', model, { input: result.usage.promptTokens, output: result.usage.completionTokens });
     return result;
   } catch (err) {
-    concurrencyLimiter.release();
     const msg = err instanceof Error ? err.message : String(err);
     log.apiError('minimax', msg);
     throw err;
+  } finally {
+    concurrencyLimiter.release();
   }
 }
 
