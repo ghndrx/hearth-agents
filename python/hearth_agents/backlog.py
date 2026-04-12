@@ -131,6 +131,11 @@ class Backlog:
         assert self._path is not None
         data = json.loads(self._path.read_text())
         self.features = [Feature(**f) for f in data]
+        # Features stuck in transient states from a prior crash/kill should be
+        # retried, not abandoned. ``done`` and ``blocked`` are terminal and stay.
+        for f in self.features:
+            if f.status in ("implementing", "reviewing", "researching"):
+                f.status = "pending"
 
     def save(self) -> None:
         if self._path:

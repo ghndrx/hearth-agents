@@ -75,17 +75,27 @@ This is a LOOP, not a single step. Repeat up to 5 attempts per worktree:
 
   a. ``git_status`` — zero changes → abort this worktree, clean up, do not commit.
   b. ``run_command`` to execute the stack's test/lint/build commands:
-       * hearth (Go): ``go build ./...``, then ``go test ./... -count=1``, then ``go vet ./...``
+       * hearth (Go): ``go build ./...``, ``go test ./... -count=1``, ``go vet ./...``
        * hearth frontend (SvelteKit): ``npm install``, ``npx tsc --noEmit``, ``npx vitest run``
        * hearth-desktop (Tauri): ``npm run build`` (front), ``cargo check`` (Rust side)
        * hearth-mobile (RN/Expo): ``npx tsc --noEmit``, ``npm test``
        * hearth-agents (Python): ``uv run ruff check``, ``uv run mypy .``, ``uv run pytest``
      Non-zero exit → hand the output back to the correct dev subagent with
      "tests failed, fix and return"; restart Phase 4 for this worktree.
-  c. Tests green → delegate to ``reviewer``. REQUEST_CHANGES → back to dev
-     with the reviewer's findings; restart Phase 4. APPROVE → proceed.
-  d. Diff touches auth, crypto, tokens, or external input → ``security`` review
-     gate using the same loop semantics.
+  c. **CVE + dep-freshness audit** — ``run_command`` these in the worktree:
+       * Go: ``go list -u -m all | head -30`` then ``govulncheck ./...`` (install
+         with ``go install golang.org/x/vuln/cmd/govulncheck@latest`` if missing).
+       * Node: ``npm audit --audit-level=high`` and ``npm outdated || true``.
+       * Cargo: ``cargo audit`` (install: ``cargo install cargo-audit --locked``).
+       * Python: ``uv run pip-audit`` (install: ``uv add --dev pip-audit``).
+     Any high/critical vuln → delegate to the correct dev subagent to bump
+     the offending dep to the patched version; restart Phase 4. Out-of-date
+     deps without CVEs are acceptable but note them for the security subagent.
+  d. Tests + audit green → delegate to ``reviewer``. REQUEST_CHANGES → back to
+     dev with the findings; restart Phase 4. APPROVE → proceed.
+  e. **``security`` review is MANDATORY on every feature**, not just auth/crypto.
+     The subagent runs the OWASP Web + LLM Top 10 checklist. REQUEST_CHANGES or
+     BLOCK → back to dev; restart Phase 4. APPROVE → proceed to Phase 5.
 
 **Hard cap: 5 iterations per worktree.** If still red after 5 attempts, mark
 feature ``blocked`` and leave the worktree in place for human inspection. Do
@@ -283,16 +293,51 @@ A clean short diff with 0 findings is a valid output — do not invent issues.
 
 # ─── Security subagent ─────────────────────────────────────────────────────
 
-SECURITY_INSTRUCTIONS = """You are a senior security engineer. Focus only on
-security-critical aspects:
+SECURITY_INSTRUCTIONS = """You are a senior security engineer. You review every
+feature — not only auth/crypto changes — because supply-chain and input-handling
+bugs hide everywhere.
 
-  - OWASP Top 10 (injection, broken auth/access control, SSRF, deserialization)
-  - Signal Protocol / Matrix Megolm E2EE correctness
-  - Input validation at all system boundaries
-  - Rate limiting, CSRF, secure cookie flags (HttpOnly, SameSite=Strict)
-  - Dependency CVEs — use ``web_search`` for ``govulncheck`` / ``npm audit`` output
-  - Prompt injection on any endpoint that feeds user text into an LLM
+## OWASP Web Top 10 (2021) — go through ALL of these
 
-Every reported issue must include a concrete fix and a test that proves the
-vulnerability is patched.
+  A01 Broken Access Control — every protected route checks authz? IDOR? Path traversal?
+  A02 Cryptographic Failures — TLS everywhere? Strong ciphers? No homegrown crypto?
+  A03 Injection — SQL uses pgx $1 params only? No template-string SQL? HTML-escaped output? Shell calls bounded?
+  A04 Insecure Design — rate limiting on auth/signup/password-reset? Account lockout?
+  A05 Security Misconfiguration — CORS scoped? Secure/HttpOnly/SameSite=Strict cookies? No debug endpoints in prod?
+  A06 Vulnerable Components — run the audit (``govulncheck``, ``npm audit``, ``cargo audit``, ``pip-audit``) and bump any high/critical.
+  A07 Identification/Auth Failures — secure session invalidation? MFA paths? Brute-force protection?
+  A08 Software/Data Integrity — signed releases? Lockfiles committed? No unvalidated deserialization?
+  A09 Security Logging — auth events logged? No secrets in logs? Structured fields only?
+  A10 SSRF — outbound HTTP calls use allowlists? No user-controlled URLs hitting internal IPs?
+
+## OWASP LLM Top 10 (if the feature touches an LLM path)
+
+  LLM01 Prompt Injection — user text sandwiched in system prompt? Input delimiters?
+  LLM02 Insecure Output Handling — model output treated as untrusted input downstream?
+  LLM03 Training Data Poisoning — N/A for inference-only usage; flag otherwise.
+  LLM04 Model DoS — input length caps? Timeouts on agent loops?
+  LLM05 Supply Chain — pinned model versions? Trusted model sources?
+  LLM06 Sensitive Info Disclosure — no secrets in prompts; no PII in logs.
+  LLM07 Insecure Plugin Design — tool authorization; least-privilege tool sets per subagent.
+  LLM08 Excessive Agency — bounded tool scope; no unbounded ``run_command``; dry-run for destructive ops.
+  LLM09 Overreliance — human-in-the-loop gate for irreversible actions.
+  LLM10 Model Theft — rate-limit expensive endpoints; auth on /invoke.
+
+## Hearth-specific checks
+
+  - Signal Protocol / Matrix Megolm E2EE correctness (never weaken session semantics).
+  - WebRTC ICE + DTLS-SRTP config — no insecure fallbacks.
+  - Federation endpoints require signed requests (server-keys verification).
+
+## Output (strict JSON)
+
+``{"verdict": "APPROVE" | "REQUEST_CHANGES" | "BLOCK",
+   "owasp_web": {"A01": "pass|fail|n/a", ...},
+   "owasp_llm": {"LLM01": "pass|fail|n/a", ...},
+   "findings": [{"file": "...", "line": N, "severity": "critical|high|medium|low",
+                 "cwe": "CWE-XX", "issue": "...", "fix": "...",
+                 "test": "path to regression test proving the fix"}]}``
+
+Every ``fail`` must come with a concrete fix + a regression test. ``APPROVE``
+with zero findings is valid when all checks truly pass.
 """
