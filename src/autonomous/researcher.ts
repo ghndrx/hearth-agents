@@ -32,12 +32,13 @@ export async function researchFeature(
   client: MiniMaxClient,
   feature: Feature,
 ): Promise<ResearchReport> {
-  // Fire ALL research topics in parallel - maximize throughput
-  console.log(`[researcher] Researching ${feature.researchTopics.length} topics in parallel for "${feature.name}"`);
+  // Limit to 2 topics to speed up research phase. Quality over quantity.
+  const topicsToResearch = feature.researchTopics.slice(0, 2);
+  console.log(`[researcher] Researching ${topicsToResearch.length} topics for "${feature.name}"`);
 
   const WIKIDELVE_TIMEOUT_MS = 3_000; // 3s timeout - fail fast, don't block MiniMax calls
 
-  const topicPromises = feature.researchTopics.map(async (topic) => {
+  const topicPromises = topicsToResearch.map(async (topic) => {
     const fullTopic = `${topic} for ${feature.name} in a Discord-like chat application`;
     let findings = '';
 
@@ -72,31 +73,8 @@ export async function researchFeature(
   const topics = await Promise.all(topicPromises);
   console.log(`[researcher] All ${topics.length} topics complete for "${feature.name}"`);
 
-  // Synthesize into a full report with competitor analysis
-  const synthesisMessages: MiniMaxMessage[] = [
-    { role: 'system', content: RESEARCH_SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: `Synthesize the following research findings into a comprehensive report for implementing "${feature.name}".
-
-**Feature**: ${feature.description}
-**Discord Parity Target**: ${feature.discordParity}
-
-**Research Findings**:
-${topics.map(t => `### ${t.topic}\n${t.findings}`).join('\n\n')}
-
-Provide:
-1. **Competitor Analysis**: How Discord implements this, what we can do better
-2. **Technical Recommendations**: Specific architecture, libraries, and approach
-3. **Risk Assessment**: What could go wrong, migration concerns, security issues
-4. **Implementation Priority**: What to build first vs later`,
-    },
-  ];
-
-  const synthesis = await client.chat(synthesisMessages, {
-    temperature: 0.2,
-    maxTokens: 6144,
-  });
+  // Skip synthesis step - PRD generator will synthesize. Saves a huge MiniMax call.
+  const synthesis = { content: '' };
 
   const fullReport = [
     `# Research Report: ${feature.name}`,
