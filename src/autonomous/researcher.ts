@@ -35,7 +35,7 @@ export async function researchFeature(
   // Fire ALL research topics in parallel - maximize throughput
   console.log(`[researcher] Researching ${feature.researchTopics.length} topics in parallel for "${feature.name}"`);
 
-  const WIKIDELVE_TIMEOUT_MS = 10_000; // 10s timeout - don't wait forever
+  const WIKIDELVE_TIMEOUT_MS = 3_000; // 3s timeout - fail fast, don't block MiniMax calls
 
   const topicPromises = feature.researchTopics.map(async (topic) => {
     const fullTopic = `${topic} for ${feature.name} in a Discord-like chat application`;

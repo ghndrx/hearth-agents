@@ -56,8 +56,9 @@ export class AutonomousLoop {
 
     await this.notifier.sendStartup();
 
-    // Generate initial research ideas
-    await this.runIdeaEngine();
+    // Skip idea engine on startup - go straight to processing features
+    // Idea engine runs after every 3rd feature instead
+    log.info('loop', 'Skipping idea engine on startup, processing features immediately');
 
     // Periodic progress updates
     this.updateTimer = setInterval(() => {
