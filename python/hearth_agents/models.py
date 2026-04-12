@@ -37,6 +37,11 @@ def build_kimi() -> ChatOpenAI:
     if settings.kimi_api_key.startswith("sk-kimi-"):
         default_headers["User-Agent"] = "claude-code/1.0.0"
 
+    # Kimi's coding endpoint enables "thinking" mode by default, which requires
+    # each subsequent turn to echo back ``reasoning_content``. LangChain's
+    # ChatOpenAI doesn't preserve that field, so every multi-turn tool call
+    # fails with "reasoning_content is missing". Disabling thinking sidesteps
+    # the whole class of errors; Kimi still beats everything on SWE-Bench without it.
     return ChatOpenAI(
         model=settings.kimi_model,
         api_key=settings.kimi_api_key,
@@ -45,4 +50,5 @@ def build_kimi() -> ChatOpenAI:
         max_retries=3,
         timeout=180,
         default_headers=default_headers or None,
+        extra_body={"thinking": {"type": "disabled"}},
     )

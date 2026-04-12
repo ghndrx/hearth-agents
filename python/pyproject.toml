@@ -2,8 +2,7 @@
 name = "hearth-agents"
 version = "0.2.0"
 description = "Autonomous development system for Hearth, powered by LangChain DeepAgents"
-readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "deepagents>=0.1.0",
     "langchain>=0.3.0",

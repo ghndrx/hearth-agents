@@ -14,7 +14,7 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
-Repo = Literal["hearth", "hearth-desktop", "hearth-mobile"]
+Repo = Literal["hearth", "hearth-desktop", "hearth-mobile", "hearth-agents"]
 
 
 @dataclass
@@ -76,6 +76,37 @@ INITIAL_FEATURES: list[Feature] = [
             "LiveKit audio track processor API for client-side ML",
         ],
         discord_parity="Discord uses Krisp — we match with open-source equivalent",
+    ),
+    # ── Dogfood features: hearth-agents improving itself ────────────────────
+    Feature(
+        id="self-prompt-tuning",
+        name="Tune orchestrator/developer prompts from real run logs",
+        description=(
+            "Read /tmp/hearth-agents.log (or the production log volume), identify cases "
+            "where Kimi responded with prose instead of tool calls, and tighten the "
+            "relevant prompts in python/hearth_agents/prompts.py. Commit the diff."
+        ),
+        priority="medium",
+        repos=["hearth-agents"],
+        research_topics=[
+            "LangChain tool-use prompt engineering patterns for code agents",
+        ],
+        discord_parity="(self-improvement, no Discord equivalent)",
+    ),
+    Feature(
+        id="self-add-cost-tracking",
+        name="Per-feature cost tracking for MiniMax + Kimi calls",
+        description=(
+            "Add a CostTracker that hooks into LangChain callbacks to record input/output "
+            "token counts per feature, persists to /data/costs.json, and exposes a "
+            "``/costs`` FastAPI endpoint. Enforces ``per_feature_budget_usd``."
+        ),
+        priority="medium",
+        repos=["hearth-agents"],
+        research_topics=[
+            "LangChain callback handlers for token usage tracking per run",
+        ],
+        discord_parity="(self-improvement, no Discord equivalent)",
     ),
 ]
 
