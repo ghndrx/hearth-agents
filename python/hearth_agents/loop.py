@@ -15,9 +15,11 @@ from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
 
-# One feature every 15 minutes is a comfortable budget pace — leaves headroom
-# for parallel research jobs and manual overrides without hitting the 5hr ceiling.
-LOOP_INTERVAL_SEC = 15 * 60
+# Short sleep between features — the provider-level rate limits (Kimi 4h window,
+# MiniMax 4500/5hr) are the real throttle; adding a long inter-feature sleep on
+# top just wastes wall-clock. 30s is enough to let the backlog flush to disk
+# and not drown structlog in interleaved events.
+LOOP_INTERVAL_SEC = 30
 
 
 def _feature_prompt(feature: Feature) -> str:
