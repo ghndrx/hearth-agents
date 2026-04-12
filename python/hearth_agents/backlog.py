@@ -28,6 +28,9 @@ class Feature:
     discord_parity: str = ""
     status: Status = "pending"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # Self-improvement features bypass normal priority ordering so the agent
+    # tunes itself in between product features instead of waiting forever.
+    self_improvement: bool = False
 
 
 # Initial backlog. The idea engine appends to this over time.
@@ -82,16 +85,19 @@ INITIAL_FEATURES: list[Feature] = [
         id="self-prompt-tuning",
         name="Tune orchestrator/developer prompts from real run logs",
         description=(
-            "Read /tmp/hearth-agents.log (or the production log volume), identify cases "
-            "where Kimi responded with prose instead of tool calls, and tighten the "
-            "relevant prompts in python/hearth_agents/prompts.py. Commit the diff."
+            "Read the agent's own run log at ``/app/logs/hearth-agents.log`` (or "
+            "``/tmp/hearth-agents.log`` in dev). Grep for tool-call histograms and "
+            "for cases where Kimi responded with prose instead of tool calls. "
+            "Use ``wikidelve_search`` to find prior research on prompt anti-patterns "
+            "(jobs #472, #481). Edit ``python/hearth_agents/prompts.py`` to tighten "
+            "whichever prompt produced the anti-pattern. Commit on the main branch "
+            "of hearth-agents with message starting ``feat(prompts):``."
         ),
-        priority="medium",
+        priority="high",
         repos=["hearth-agents"],
-        research_topics=[
-            "LangChain tool-use prompt engineering patterns for code agents",
-        ],
-        discord_parity="(self-improvement, no Discord equivalent)",
+        research_topics=[],
+        discord_parity="(self-improvement)",
+        self_improvement=True,
     ),
     Feature(
         id="self-add-cost-tracking",
@@ -101,12 +107,13 @@ INITIAL_FEATURES: list[Feature] = [
             "token counts per feature, persists to /data/costs.json, and exposes a "
             "``/costs`` FastAPI endpoint. Enforces ``per_feature_budget_usd``."
         ),
-        priority="medium",
+        priority="high",
         repos=["hearth-agents"],
         research_topics=[
             "LangChain callback handlers for token usage tracking per run",
         ],
-        discord_parity="(self-improvement, no Discord equivalent)",
+        discord_parity="(self-improvement)",
+        self_improvement=True,
     ),
 ]
 
@@ -131,9 +138,19 @@ class Backlog:
             self._path.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
 
     def next_pending(self) -> Feature | None:
+        """Self-improvement features always jump the queue ahead of product
+        features at the same priority band — the agent cannot help the user
+        effectively if it keeps making the same prompt mistakes. Within each
+        (self_improvement, priority) band, oldest first."""
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         candidates = [f for f in self.features if f.status == "pending"]
-        candidates.sort(key=lambda f: priority_order.get(f.priority, 99))
+        candidates.sort(
+            key=lambda f: (
+                0 if f.self_improvement else 1,
+                priority_order.get(f.priority, 99),
+                f.created_at,
+            )
+        )
         return candidates[0] if candidates else None
 
     def set_status(self, feature_id: str, status: Status) -> None:

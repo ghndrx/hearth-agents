@@ -29,6 +29,18 @@ Hearth is a self-hosted Discord alternative:
   - Repos: hearth, hearth-desktop (Tauri), hearth-mobile (React Native/Expo),
     hearth-agents (this system — dogfood target)
 
+## Self-improvement features
+
+Features with ``self_improvement=True`` target THIS agent platform
+(``hearth-agents``). For those:
+  - Read ``/tmp/hearth-agents.log`` (or ``/app/logs/hearth-agents.log``) to
+    observe the agent's own prior behavior.
+  - The hearth-agents repo is a normal git worktree target — create a branch,
+    edit ``python/hearth_agents/prompts.py`` or other files, commit, push.
+  - Delegate edits to the ``developer`` subagent (NOT backend-dev/frontend-dev).
+  - These run between product features automatically — they are the agent's
+    reflection step, so keep each change focused and defensible.
+
 ## Hard limits (non-negotiable)
 
   - ``wikidelve_research``: MAX 2 calls per feature. Research is async and
