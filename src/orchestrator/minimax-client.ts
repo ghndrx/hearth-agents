@@ -18,6 +18,32 @@ import type {
 import { rateLimiter } from "../autonomous/rate-limiter.js";
 import { log } from "../autonomous/logger.js";
 
+// ── Concurrency limiter ───────────────────────────────────────────────
+
+class Semaphore {
+  private queue: Array<() => void> = [];
+  private active = 0;
+  constructor(private max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.max) {
+      this.active++;
+      return;
+    }
+    return new Promise<void>(resolve => {
+      this.queue.push(() => { this.active++; resolve(); });
+    });
+  }
+
+  release(): void {
+    this.active--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+const concurrencyLimiter = new Semaphore(3); // Max 3 simultaneous API calls
+
 // ── Constants ──────────────────────────────────────────────────────────
 
 const DEFAULT_MINIMAX_BASE_URL = "https://api.minimax.io/v1";
@@ -112,6 +138,9 @@ async function chat(
     body.response_format = options.responseFormat;
   }
 
+  // Concurrency limiter: max 3 simultaneous API calls to avoid flooding
+  await concurrencyLimiter.acquire();
+
   // Rate limit: wait for capacity before calling
   await rateLimiter.waitForCapacity();
   rateLimiter.track();
@@ -120,9 +149,11 @@ async function chat(
 
   try {
     const result = await executeWithRetry(config, body);
+    concurrencyLimiter.release();
     log.apiCall('minimax', model, { input: result.usage.promptTokens, output: result.usage.completionTokens });
     return result;
   } catch (err) {
+    concurrencyLimiter.release();
     const msg = err instanceof Error ? err.message : String(err);
     log.apiError('minimax', msg);
     throw err;
@@ -139,18 +170,20 @@ async function executeWithRetry(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      log.debug('minimax', `Attempt ${attempt + 1}/${MAX_RETRIES}`);
-      const baseURL = config.baseURL;
-      const apiKey = config.apiKey;
-      const fetchResponse = await fetch(`${baseURL}/chat/completions`, {
+      log.debug('minimax', `Attempt ${attempt + 1}/${MAX_RETRIES} to ${config.baseURL}`);
+      const url = `${config.baseURL}/chat/completions`;
+      log.debug('minimax', `Fetching ${url} with model ${body.model}, ${body.messages?.length} messages`);
+      const fetchResponse = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+          'Authorization': `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       });
+
+      log.debug('minimax', `Got response: ${fetchResponse.status}`);
 
       if (!fetchResponse.ok) {
         const errorText = await fetchResponse.text();
@@ -158,6 +191,7 @@ async function executeWithRetry(
       }
 
       const data = await fetchResponse.json() as any;
+      log.debug('minimax', `Parsed response, content length: ${data.choices?.[0]?.message?.content?.length ?? 0}`);
       return mapFetchResponse(data);
     } catch (err: unknown) {
       lastError = err;
