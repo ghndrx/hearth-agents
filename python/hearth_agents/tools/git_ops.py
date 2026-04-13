@@ -42,20 +42,37 @@ def git_status(repo_path: str) -> str:
 
 
 @tool
-def git_commit(repo_path: str, message: str, add_all: bool = True) -> str:
-    """Stage and commit changes in a repo.
+def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = True) -> str:
+    """Stage, commit, and (by default) push the current branch.
+
+    Commit and push are coupled because earlier runs committed locally and
+    never pushed, leaving origin out of sync and the verifier retrying forever.
+    Pushing here makes "committed" mean "durable on origin" for the pipeline.
 
     Args:
         repo_path: Absolute path to the repo/worktree.
         message: Commit message (use Conventional Commits: ``feat: ...``).
         add_all: Whether to ``git add -A`` first. Default True.
+        push: Whether to ``git push -u origin HEAD`` after commit. Default True.
+            Pass False only for experimental / throwaway commits.
     """
     if add_all:
         code, out = _run(["git", "add", "-A"], cwd=repo_path, timeout=15)
         if code != 0:
             return f"git add failed: {out}"
     code, out = _run(["git", "commit", "-m", message], cwd=repo_path, timeout=15)
-    return out if code == 0 else f"commit failed: {out}"
+    if code != 0:
+        return f"commit failed: {out}"
+    commit_out = out
+    if not push:
+        return commit_out
+    pcode, pout = _run(["git", "push", "-u", "origin", "HEAD"], cwd=repo_path, timeout=60)
+    if pcode != 0:
+        # Push failure is a real failure — the iterate loop should retry rather
+        # than proceed as if the commit is durable. Surface the error clearly.
+        log.warning("git_push_failed", repo=repo_path, error=pout)
+        return f"commit ok but push failed: {pout}"
+    return f"{commit_out}\npushed: {pout}"
 
 
 @tool
