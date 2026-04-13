@@ -23,10 +23,11 @@ from .config import settings
 from .logger import log
 from .models import build_minimax
 
-IDEA_INTERVAL_SEC = 900  # check every 15 minutes
-IDEA_LOW_WATER = 3       # generate when fewer than this many product features pend
-IDEA_BATCH = 5           # ask MiniMax for this many ideas per generation
-WIKIDELVE_HINT_LIMIT = 8 # how many KB titles to feed in as grounding
+IDEA_INTERVAL_SEC = 1800  # normal cadence: 30 minutes between top-ups
+IDEA_RETRY_SEC = 60       # fast retry when last generation added 0 (parse failure / dupes)
+IDEA_LOW_WATER = 5        # generate when fewer than this many product features pend
+IDEA_BATCH = 10           # ask MiniMax for this many ideas per generation
+WIKIDELVE_HINT_LIMIT = 8  # how many KB titles to feed in as grounding
 
 
 _SYSTEM_PROMPT = """You are a product strategist for Hearth, a self-hosted, federated, open-source \
@@ -80,13 +81,27 @@ def _user_prompt(backlog: Backlog, hints: list[str]) -> str:
 
 
 def _parse_ideas(text: str) -> list[dict[str, Any]]:
-    """Extract the JSON array from MiniMax's reply, tolerating code fences."""
+    """Extract the JSON array from MiniMax's reply.
+
+    MiniMax M2.7 wraps responses in ``<think>...</think>`` reasoning blocks and
+    sometimes ```` ```json ```` fences. Strip both, then locate the first ``[``
+    and last ``]`` to isolate the JSON array even if there's trailing prose.
+    """
     text = text.strip()
+    # Drop think blocks (MiniMax M2.7 always emits these)
+    while "<think>" in text and "</think>" in text:
+        start = text.index("<think>")
+        end = text.index("</think>") + len("</think>")
+        text = (text[:start] + text[end:]).strip()
+    # Drop code fences
     if text.startswith("```"):
         text = text.split("```", 2)[1]
         if text.startswith("json"):
             text = text[4:]
-        text = text.rsplit("```", 1)[0]
+        text = text.rsplit("```", 1)[0].strip()
+    # Slice from first [ to last ] to tolerate any remaining prose
+    if "[" in text and "]" in text:
+        text = text[text.index("["): text.rindex("]") + 1]
     try:
         data = json.loads(text)
         return data if isinstance(data, list) else []
@@ -142,8 +157,13 @@ async def run_idea_engine(backlog: Backlog) -> None:
             f for f in backlog.features
             if f.status == "pending" and not f.self_improvement
         ]
+        sleep_for = IDEA_INTERVAL_SEC
         if len(pending_product) < IDEA_LOW_WATER:
             log.info("idea_generating", pending_product=len(pending_product))
             added = await _generate_once(backlog, model)
             log.info("idea_generation_done", added=added)
-        await asyncio.sleep(IDEA_INTERVAL_SEC)
+            # If we produced nothing (parse failure or all dupes), retry quickly
+            # rather than letting workers starve for the full interval.
+            if added == 0:
+                sleep_for = IDEA_RETRY_SEC
+        await asyncio.sleep(sleep_for)
