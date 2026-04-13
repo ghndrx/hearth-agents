@@ -24,6 +24,26 @@ from .verify import verify_changes
 # and not drown structlog in interleaved events.
 LOOP_INTERVAL_SEC = 30
 
+# Shared across workers so all of them pause together when Kimi rate-limits.
+# One worker hitting 429 almost certainly means the others will too — no point
+# spinning them.
+_RATE_LIMIT_BACKOFF_SEC = 15 * 60
+_rate_limit_until: float = 0.0
+
+
+def _is_rate_limit_error(e: BaseException) -> bool:
+    """Heuristic match for Kimi/MiniMax/OpenAI rate-limit errors.
+
+    We can't rely on exception type alone because LangChain wraps provider
+    errors inconsistently. The 429 status code and the ``rate_limit_reached``
+    substring are stable across wrappers.
+    """
+    msg = str(e).lower()
+    if "rate_limit_reached" in msg or "rate limit" in msg:
+        return True
+    code = getattr(e, "status_code", None) or getattr(e, "code", None)
+    return code == 429
+
 # Atomic claim lock: with multiple workers we must never let two workers grab
 # the same pending feature. Also used to enforce a single-self-improvement rule
 # so parallel workers don't both edit prompts.py at once.
@@ -203,9 +223,27 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
             f"⏱️ [w{worker_id}] timeout {feature.id} after {settings.per_feature_timeout_sec}s"
         )
     except Exception as e:
-        log.exception("feature_failed", id=feature.id, error=str(e))
-        backlog.set_status(feature.id, "blocked")
-        await notifier.send(f"💥 [w{worker_id}] failed {feature.id}: {e}")
+        if _is_rate_limit_error(e):
+            # Return the feature to pending (another worker, or this one after
+            # the cooldown, will retry) and set a shared cooldown so no worker
+            # hammers the API until the window refreshes.
+            global _rate_limit_until
+            _rate_limit_until = asyncio.get_event_loop().time() + _RATE_LIMIT_BACKOFF_SEC
+            backlog.set_status(feature.id, "pending")
+            log.warning(
+                "rate_limited",
+                id=feature.id,
+                backoff_sec=_RATE_LIMIT_BACKOFF_SEC,
+                error=str(e)[:200],
+            )
+            await notifier.send(
+                f"🛑 [w{worker_id}] rate-limited on {feature.id} — all workers "
+                f"pausing {_RATE_LIMIT_BACKOFF_SEC // 60}m, then retrying"
+            )
+        else:
+            log.exception("feature_failed", id=feature.id, error=str(e))
+            backlog.set_status(feature.id, "blocked")
+            await notifier.send(f"💥 [w{worker_id}] failed {feature.id}: {e}")
     finally:
         if feature.self_improvement:
             global _self_improv_active
@@ -222,6 +260,13 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
 async def _worker(worker_id: int, backlog: Backlog, agent: Any, notifier: Notifier) -> None:
     """One feature-processing worker. Multiple workers share one backlog + agent."""
     while True:
+        # Respect the shared rate-limit cooldown set by any worker that hit 429.
+        now = asyncio.get_event_loop().time()
+        if _rate_limit_until > now:
+            wait = _rate_limit_until - now
+            log.info("rate_limit_sleeping", worker=worker_id, sleep_sec=int(wait))
+            await asyncio.sleep(wait)
+            continue
         did_work = await run_once(agent, backlog, notifier, worker_id=worker_id)
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
