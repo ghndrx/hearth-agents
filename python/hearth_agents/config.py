@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     hearth_repo_path: str = "/repos/hearth"
     hearth_desktop_path: str = "/repos/hearth-desktop"
     hearth_mobile_path: str = "/repos/hearth-mobile"
+    hearth_agents_path: str = "/repos/hearth-agents"
 
     # Budget & rate limits
     daily_budget_usd: float = 5.0
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     telegram_allowed_chat_ids: str = Field(
         default="", description="Comma-separated chat IDs allowed to use the bot"
     )
+    telegram_notify_chat_id: int = 0
 
     # GitHub webhooks
     github_webhook_secret: str = ""
@@ -63,6 +65,7 @@ class Settings(BaseSettings):
             "hearth": self.hearth_repo_path,
             "hearth-desktop": self.hearth_desktop_path,
             "hearth-mobile": self.hearth_mobile_path,
+            "hearth-agents": self.hearth_agents_path,
         }
 
 

@@ -14,7 +14,7 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
-Repo = Literal["hearth", "hearth-desktop", "hearth-mobile"]
+Repo = Literal["hearth", "hearth-desktop", "hearth-mobile", "hearth-agents"]
 
 
 @dataclass
@@ -28,6 +28,9 @@ class Feature:
     discord_parity: str = ""
     status: Status = "pending"
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # Self-improvement features bypass normal priority ordering so the agent
+    # tunes itself in between product features instead of waiting forever.
+    self_improvement: bool = False
 
 
 # Initial backlog. The idea engine appends to this over time.
@@ -77,6 +80,41 @@ INITIAL_FEATURES: list[Feature] = [
         ],
         discord_parity="Discord uses Krisp — we match with open-source equivalent",
     ),
+    # ── Dogfood features: hearth-agents improving itself ────────────────────
+    Feature(
+        id="self-prompt-tuning",
+        name="Tune orchestrator/developer prompts from real run logs",
+        description=(
+            "Read the agent's own run log at ``/app/logs/hearth-agents.log`` (or "
+            "``/tmp/hearth-agents.log`` in dev). Grep for tool-call histograms and "
+            "for cases where Kimi responded with prose instead of tool calls. "
+            "Use ``wikidelve_search`` to find prior research on prompt anti-patterns "
+            "(jobs #472, #481). Edit ``python/hearth_agents/prompts.py`` to tighten "
+            "whichever prompt produced the anti-pattern. Commit on the main branch "
+            "of hearth-agents with message starting ``feat(prompts):``."
+        ),
+        priority="high",
+        repos=["hearth-agents"],
+        research_topics=[],
+        discord_parity="(self-improvement)",
+        self_improvement=True,
+    ),
+    Feature(
+        id="self-add-cost-tracking",
+        name="Per-feature cost tracking for MiniMax + Kimi calls",
+        description=(
+            "Add a CostTracker that hooks into LangChain callbacks to record input/output "
+            "token counts per feature, persists to /data/costs.json, and exposes a "
+            "``/costs`` FastAPI endpoint. Enforces ``per_feature_budget_usd``."
+        ),
+        priority="high",
+        repos=["hearth-agents"],
+        research_topics=[
+            "LangChain callback handlers for token usage tracking per run",
+        ],
+        discord_parity="(self-improvement)",
+        self_improvement=True,
+    ),
 ]
 
 
@@ -93,6 +131,11 @@ class Backlog:
         assert self._path is not None
         data = json.loads(self._path.read_text())
         self.features = [Feature(**f) for f in data]
+        # Features stuck in transient states from a prior crash/kill should be
+        # retried, not abandoned. ``done`` and ``blocked`` are terminal and stay.
+        for f in self.features:
+            if f.status in ("implementing", "reviewing", "researching"):
+                f.status = "pending"
 
     def save(self) -> None:
         if self._path:
@@ -100,9 +143,19 @@ class Backlog:
             self._path.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
 
     def next_pending(self) -> Feature | None:
+        """Self-improvement features always jump the queue ahead of product
+        features at the same priority band — the agent cannot help the user
+        effectively if it keeps making the same prompt mistakes. Within each
+        (self_improvement, priority) band, oldest first."""
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         candidates = [f for f in self.features if f.status == "pending"]
-        candidates.sort(key=lambda f: priority_order.get(f.priority, 99))
+        candidates.sort(
+            key=lambda f: (
+                0 if f.self_improvement else 1,
+                priority_order.get(f.priority, 99),
+                f.created_at,
+            )
+        )
         return candidates[0] if candidates else None
 
     def set_status(self, feature_id: str, status: Status) -> None:
