@@ -31,6 +31,9 @@ class Feature:
     # Self-improvement features bypass normal priority ordering so the agent
     # tunes itself in between product features instead of waiting forever.
     self_improvement: bool = False
+    # How many times the healer has reset this feature from blocked→pending.
+    # Capped so a permanently-broken feature doesn't ping-pong forever.
+    heal_attempts: int = 0
 
 
 # Initial backlog. The idea engine appends to this over time.

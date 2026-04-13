@@ -15,6 +15,7 @@ from .agent import build_agent
 from .backlog import Backlog
 from .bot import run_bot
 from .config import settings
+from .healer import run_healer
 from .idea_engine import run_idea_engine
 from .logger import log
 from .loop import run_forever
@@ -37,6 +38,7 @@ async def _main() -> None:
         run_forever(backlog, agent),
         run_bot(backlog, agent),
         run_idea_engine(backlog),
+        run_healer(backlog),
     )
 
 
