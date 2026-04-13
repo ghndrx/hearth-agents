@@ -15,6 +15,7 @@ from .agent import build_agent
 from .backlog import Backlog
 from .bot import run_bot
 from .config import settings
+from .idea_engine import run_idea_engine
 from .logger import log
 from .loop import run_forever
 from .server import build_app
@@ -35,6 +36,7 @@ async def _main() -> None:
         _serve(app),
         run_forever(backlog, agent),
         run_bot(backlog, agent),
+        run_idea_engine(backlog),
     )
 
 
