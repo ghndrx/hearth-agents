@@ -88,15 +88,17 @@ async def _claim_next(backlog: Backlog) -> Feature | None:
         return feature
 
 
-async def run_once(agent: Any, backlog: Backlog, notifier: Notifier) -> bool:
+async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: int = 0) -> bool:
     """Process one feature. Returns True if work was done, False if idle."""
     feature = await _claim_next(backlog)
     if feature is None:
         log.debug("loop_idle", reason="no_pending_features")
         return False
 
-    log.info("feature_start", id=feature.id, priority=feature.priority)
-    await notifier.send(f"▶️ start [{feature.priority}] {feature.id}: {feature.name}")
+    log.info("feature_start", id=feature.id, priority=feature.priority, worker=worker_id)
+    kind = "🔧 self-improve" if feature.self_improvement else "🚀 product"
+    tag = f"[w{worker_id}]"
+    await notifier.send(f"▶️ {tag} {kind} [{feature.priority}] {feature.id}: {feature.name}")
 
     try:
         result = await agent.ainvoke({"messages": [{"role": "user", "content": _feature_prompt(feature)}]})
@@ -111,11 +113,11 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier) -> bool:
         log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason)
         emoji = "✅" if verdict == "done" else "⛔"
         suffix = "" if verdict == claimed else f" (agent claimed {claimed}; {reason})"
-        await notifier.send(f"{emoji} {verdict} {feature.id}: {feature.name}{suffix}")
+        await notifier.send(f"{emoji} [w{worker_id}] {verdict} {feature.id}: {feature.name}{suffix}")
     except Exception as e:
         log.exception("feature_failed", id=feature.id, error=str(e))
         backlog.set_status(feature.id, "blocked")
-        await notifier.send(f"💥 failed {feature.id}: {e}")
+        await notifier.send(f"💥 [w{worker_id}] failed {feature.id}: {e}")
     finally:
         if feature.self_improvement:
             global _self_improv_active
@@ -163,7 +165,7 @@ def _enqueue_self_tune(backlog: Backlog, trigger_feature_id: str) -> None:
 async def _worker(worker_id: int, backlog: Backlog, agent: Any, notifier: Notifier) -> None:
     """One feature-processing worker. Multiple workers share one backlog + agent."""
     while True:
-        did_work = await run_once(agent, backlog, notifier)
+        did_work = await run_once(agent, backlog, notifier, worker_id=worker_id)
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
 

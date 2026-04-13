@@ -22,6 +22,7 @@ from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
 from .models import build_minimax
+from .notify import Notifier
 
 IDEA_INTERVAL_SEC = 1800  # normal cadence: 30 minutes between top-ups
 IDEA_RETRY_SEC = 60       # fast retry when last generation added 0 (parse failure / dupes)
@@ -151,19 +152,23 @@ async def run_idea_engine(backlog: Backlog) -> None:
         log.info("idea_engine_disabled", reason="no_minimax_key")
         return
     model = build_minimax()
+    notifier = Notifier()
     log.info("idea_engine_started", interval_sec=IDEA_INTERVAL_SEC, low_water=IDEA_LOW_WATER)
-    while True:
-        pending_product = [
-            f for f in backlog.features
-            if f.status == "pending" and not f.self_improvement
-        ]
-        sleep_for = IDEA_INTERVAL_SEC
-        if len(pending_product) < IDEA_LOW_WATER:
-            log.info("idea_generating", pending_product=len(pending_product))
-            added = await _generate_once(backlog, model)
-            log.info("idea_generation_done", added=added)
-            # If we produced nothing (parse failure or all dupes), retry quickly
-            # rather than letting workers starve for the full interval.
-            if added == 0:
-                sleep_for = IDEA_RETRY_SEC
-        await asyncio.sleep(sleep_for)
+    try:
+        while True:
+            pending_product = [
+                f for f in backlog.features
+                if f.status == "pending" and not f.self_improvement
+            ]
+            sleep_for = IDEA_INTERVAL_SEC
+            if len(pending_product) < IDEA_LOW_WATER:
+                log.info("idea_generating", pending_product=len(pending_product))
+                added = await _generate_once(backlog, model)
+                log.info("idea_generation_done", added=added)
+                if added > 0:
+                    await notifier.send(f"💡 idea engine added {added} product features")
+                else:
+                    sleep_for = IDEA_RETRY_SEC
+            await asyncio.sleep(sleep_for)
+    finally:
+        await notifier.close()
