@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     minimax_rate_limit: int = 4500  # per 5-hour window
     max_concurrent_subagents: int = 3
     loop_workers: int = 1
+    # Wall-clock timeout for a single feature's agent.ainvoke call. Stopgap for
+    # ``self-hard-kill-switch`` — prevents runaway features from chewing quota.
+    per_feature_timeout_sec: int = 1800
 
     # Server
     server_host: str = "0.0.0.0"

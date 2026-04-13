@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 
 from ..config import settings
 from ..logger import log
+from ..research_tracker import list_pending, list_recent, record_job
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 
@@ -89,7 +90,40 @@ def wikidelve_research(topic: str) -> str:
             r = c.post("/api/research", json={"topic": topic})
             r.raise_for_status()
             job = r.json()
-        return f"Queued job {job.get('job_id', '?')} — {job.get('topic', topic)}"
+        job_id = str(job.get("job_id", "?"))
+        record_job(job_id, topic)
+        return f"Queued job {job_id} — {job.get('topic', topic)}"
     except Exception as e:
         log.warning("wikidelve_research_failed", error=str(e))
         return f"Could not queue research: {e}"
+
+
+@tool
+def wikidelve_pending_jobs() -> str:
+    """List wikidelve research jobs this agent system has queued but not yet
+    confirmed complete. Use this BEFORE calling ``wikidelve_research`` to avoid
+    double-queueing the same topic.
+
+    Returns:
+        Newline-delimited ``job_id | topic | queued_at`` entries, or ``(none)``.
+    """
+    pending = list_pending(limit=20)
+    if not pending:
+        return "(none)"
+    return "\n".join(f"{j['job_id']} | {j.get('topic','?')} | {j.get('ts','?')}" for j in pending)
+
+
+@tool
+def wikidelve_recent_completions(limit: int = 10) -> str:
+    """Show the most-recently tracked wikidelve research jobs with their status.
+    Useful for seeing which of your prior research requests have landed in the KB.
+
+    Args:
+        limit: Max entries to return (default 10).
+    """
+    recent = list_recent(limit=limit)
+    if not recent:
+        return "(none)"
+    return "\n".join(
+        f"[{j.get('status','?')}] {j['job_id']} | {j.get('topic','?')}" for j in recent
+    )

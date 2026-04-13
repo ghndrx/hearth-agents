@@ -101,7 +101,10 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
     await notifier.send(f"▶️ {tag} {kind} [{feature.priority}] {feature.id}: {feature.name}")
 
     try:
-        result = await agent.ainvoke({"messages": [{"role": "user", "content": _feature_prompt(feature)}]})
+        result = await asyncio.wait_for(
+            agent.ainvoke({"messages": [{"role": "user", "content": _feature_prompt(feature)}]}),
+            timeout=settings.per_feature_timeout_sec,
+        )
         last = result["messages"][-1].content if result.get("messages") else ""
         claimed = "blocked" if "blocked" in last.lower()[:200] else "done"
         # Override the agent's self-reported verdict: if no worktree has
@@ -114,6 +117,12 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
         emoji = "✅" if verdict == "done" else "⛔"
         suffix = "" if verdict == claimed else f" (agent claimed {claimed}; {reason})"
         await notifier.send(f"{emoji} [w{worker_id}] {verdict} {feature.id}: {feature.name}{suffix}")
+    except asyncio.TimeoutError:
+        log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
+        backlog.set_status(feature.id, "blocked")
+        await notifier.send(
+            f"⏱️ [w{worker_id}] timeout {feature.id} after {settings.per_feature_timeout_sec}s"
+        )
     except Exception as e:
         log.exception("feature_failed", id=feature.id, error=str(e))
         backlog.set_status(feature.id, "blocked")

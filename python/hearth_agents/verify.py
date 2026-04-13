@@ -33,14 +33,37 @@ def _has_commits(worktree: Path, base: str) -> bool:
         return False
 
 
+def _remote_has_branch(repo_path: str, branch: str) -> bool:
+    """Return True if ``branch`` exists on origin. Uses ``git ls-remote``.
+
+    This catches the common failure mode where the agent commits locally but
+    never pushes — the verifier's earlier "has commits" check passes while
+    the work is actually invisible on GitHub.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_path, "ls-remote", "--heads", "origin", branch],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except subprocess.TimeoutExpired:
+        return False
+
+
 def verify_changes(feature: Feature) -> tuple[bool, str]:
-    """Check whether the feature actually produced committed changes.
+    """Check whether the feature actually produced *pushed* changes.
 
     Returns ``(ok, reason)``. ``ok`` is True if at least one target repo's
-    ``feat/<feature_id>`` worktree has commits beyond its base branch.
+    ``feat/<feature_id>`` worktree has commits beyond its base branch AND
+    the branch exists on the remote. Local-only commits no longer count —
+    the whole point of this loop is visible PRs on GitHub.
     """
     branch = f"feat/{feature.id}"
-    touched: list[str] = []
+    committed: list[str] = []
+    pushed: list[str] = []
 
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -51,8 +74,12 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
             continue
         base = "develop" if repo_name == "hearth" else "main"
         if _has_commits(wt, base):
-            touched.append(repo_name)
+            committed.append(repo_name)
+            if _remote_has_branch(repo_path, branch):
+                pushed.append(repo_name)
 
-    if touched:
-        return True, f"commits on: {', '.join(touched)}"
+    if pushed:
+        return True, f"pushed to: {', '.join(pushed)}"
+    if committed:
+        return False, f"committed locally on {', '.join(committed)} but never pushed {branch}"
     return False, f"no commits on any worktree for {branch}"

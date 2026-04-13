@@ -22,7 +22,9 @@ from .tools import (
     git_worktree_remove,
     run_command,
     web_search,
+    wikidelve_pending_jobs,
     wikidelve_read,
+    wikidelve_recent_completions,
     wikidelve_research,
     wikidelve_search,
 )
@@ -31,6 +33,8 @@ ORCHESTRATOR_TOOLS = [
     wikidelve_search,
     wikidelve_read,
     wikidelve_research,
+    wikidelve_pending_jobs,
+    wikidelve_recent_completions,
     web_search,
     run_command,
     git_status,
