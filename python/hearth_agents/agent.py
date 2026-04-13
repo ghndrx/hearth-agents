@@ -11,7 +11,7 @@ from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
 
 from .config import settings
-from .models import build_kimi
+from .models import build_kimi, build_minimax
 from .prompts import ORCHESTRATOR_INSTRUCTIONS
 from .subagents import build_subagents
 from .tools import (
@@ -49,23 +49,36 @@ ORCHESTRATOR_TOOLS = [
 ]
 
 
-def build_agent():
-    """Create the top-level DeepAgent with all tools and subagents wired in.
-
-    Uses Kimi as the driving model — it's the strongest coder on our stack
-    (76.8% SWE-Bench) and the orchestrator's job is mostly code reasoning plus
-    delegation, which plays to Kimi's strengths.
-    """
-    # Root the filesystem backend at the parent of all target repos so the
-    # agent can ``ls``/``read_file``/``write_file`` against real Hearth code
-    # (and against hearth-agents itself for dogfooding). Without this override,
-    # DeepAgents defaults to a virtual in-memory FS that can't see real files.
+def _build_with_model(model):  # type: ignore[no-untyped-def]
+    """Construct a DeepAgent bound to the given model. Both Kimi and MiniMax
+    agents share the same tools, subagents, and filesystem backend — only the
+    underlying chat model differs."""
     fs_root = Path(settings.hearth_repo_path).resolve().parent
     return create_deep_agent(
         tools=ORCHESTRATOR_TOOLS,
         system_prompt=ORCHESTRATOR_INSTRUCTIONS,
         subagents=build_subagents(),
-        model=build_kimi(),
+        model=model,
         backend=FilesystemBackend(root_dir=fs_root, virtual_mode=False),
         debug=True,
     )
+
+
+def build_agent():
+    """Create the primary (Kimi) DeepAgent.
+
+    Kimi is the strongest coder on our stack (76.8% SWE-Bench). Used by
+    default for everything; falls back to ``build_fallback_agent`` only when
+    Kimi rate-limits.
+    """
+    return _build_with_model(build_kimi())
+
+
+def build_fallback_agent():
+    """Create the fallback (MiniMax) DeepAgent for when Kimi 429s.
+
+    MiniMax M2.7 is weaker at code generation but has a separate quota bucket
+    (Plus plan: 4500 req/5hr), so when Kimi's window saturates we keep shipping
+    features instead of sleeping.
+    """
+    return _build_with_model(build_minimax())

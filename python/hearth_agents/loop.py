@@ -257,21 +257,36 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
 
 
 
-async def _worker(worker_id: int, backlog: Backlog, agent: Any, notifier: Notifier) -> None:
-    """One feature-processing worker. Multiple workers share one backlog + agent."""
+async def _worker(
+    worker_id: int,
+    backlog: Backlog,
+    agent: Any,
+    notifier: Notifier,
+    fallback_agent: Any | None = None,
+) -> None:
+    """One feature-processing worker. Multiple workers share one backlog + agent.
+
+    During a Kimi rate-limit cooldown, falls back to ``fallback_agent`` (MiniMax)
+    instead of sleeping — different provider, different quota bucket, work keeps
+    flowing. If no fallback is configured, sleeps as before.
+    """
     while True:
-        # Respect the shared rate-limit cooldown set by any worker that hit 429.
         now = asyncio.get_event_loop().time()
-        if _rate_limit_until > now:
+        cooldown_active = _rate_limit_until > now
+        if cooldown_active and fallback_agent is None:
+            # No fallback available — old behavior: sleep until cooldown expires.
             wait = _rate_limit_until - now
             log.info("rate_limit_sleeping", worker=worker_id, sleep_sec=int(wait))
             await asyncio.sleep(wait)
             continue
-        did_work = await run_once(agent, backlog, notifier, worker_id=worker_id)
+        active_agent = fallback_agent if cooldown_active else agent
+        if cooldown_active:
+            log.info("using_fallback_agent", worker=worker_id, until=int(_rate_limit_until - now))
+        did_work = await run_once(active_agent, backlog, notifier, worker_id=worker_id)
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
 
-async def run_forever(backlog: Backlog, agent: Any) -> None:
+async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None = None) -> None:
     """Main loop. Runs until cancelled. Shares state with the HTTP server and bot.
 
     Spawns ``settings.loop_workers`` workers against the shared backlog. Default
@@ -283,6 +298,8 @@ async def run_forever(backlog: Backlog, agent: Any) -> None:
     await notifier.send(f"🔥 hearth-agents loop started — workers={n} {backlog.stats()}")
 
     try:
-        await asyncio.gather(*[_worker(i, backlog, agent, notifier) for i in range(n)])
+        await asyncio.gather(
+            *[_worker(i, backlog, agent, notifier, fallback_agent) for i in range(n)]
+        )
     finally:
         await notifier.close()

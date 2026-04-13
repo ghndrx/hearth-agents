@@ -11,7 +11,7 @@ import asyncio
 
 import uvicorn
 
-from .agent import build_agent
+from .agent import build_agent, build_fallback_agent
 from .backlog import Backlog
 from .bot import run_bot
 from .config import settings
@@ -30,12 +30,20 @@ async def _serve(app) -> None:  # type: ignore[no-untyped-def]
 async def _main() -> None:
     backlog = Backlog(settings.backlog_path)
     agent = build_agent()
+    # Build the fallback eagerly so the first 429 doesn't pay model-init latency
+    # (and so config errors surface at startup, not mid-feature).
+    try:
+        fallback_agent = build_fallback_agent()
+        log.info("fallback_agent_ready")
+    except Exception as e:
+        fallback_agent = None
+        log.warning("fallback_agent_unavailable", error=str(e))
     app = build_app(backlog, agent)
     log.info("starting", port=settings.server_port, stats=backlog.stats())
 
     await asyncio.gather(
         _serve(app),
-        run_forever(backlog, agent),
+        run_forever(backlog, agent, fallback_agent=fallback_agent),
         run_bot(backlog, agent),
         run_idea_engine(backlog),
         run_healer(backlog),
