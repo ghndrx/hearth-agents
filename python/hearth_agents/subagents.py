@@ -9,6 +9,7 @@ constraints (Fiber, pgx, Svelte 5 runes) are spelled out explicitly.
 
 from typing import Any
 
+from .models import build_minimax
 from .prompts import (
     BACKEND_DEV_INSTRUCTIONS,
     DEVELOPER_INSTRUCTIONS,
@@ -28,9 +29,17 @@ from .tools import (
 
 
 def build_subagents() -> list[dict[str, Any]]:
-    """Return the SubAgent specs expected by ``create_deep_agent``."""
+    """Return the SubAgent specs expected by ``create_deep_agent``.
+
+    The reviewer and security subagents run on MiniMax while the dev subagents
+    run on Kimi (orchestrator's inherited model). Research on architect/verifier
+    patterns is explicit: same-model review shares the reasoning patterns that
+    produced the original errors, so use different architectures for review.
+    """
     dev_tools = [wikidelve_search, wikidelve_read, web_search, run_command, git_status, git_commit]
     review_tools = [git_status, run_command, wikidelve_search, wikidelve_read]
+    # Build once so both reviewer + security share the client / connection pool.
+    review_model = build_minimax()
 
     return [
         {
@@ -73,18 +82,22 @@ def build_subagents() -> list[dict[str, Any]]:
             "name": "reviewer",
             "description": (
                 "Reviews a dev subagent's diff against acceptance criteria. "
-                "Returns JSON verdict (APPROVE / REQUEST_CHANGES / BLOCK)."
+                "Returns JSON verdict (APPROVE / REQUEST_CHANGES / BLOCK). "
+                "Runs on MiniMax for architectural diversity vs the Kimi implementer."
             ),
             "system_prompt": REVIEWER_INSTRUCTIONS,
             "tools": review_tools,
+            "model": review_model,
         },
         {
             "name": "security",
             "description": (
                 "Security review: OWASP, E2EE correctness, dependency CVEs, prompt "
-                "injection. Call for any change touching auth, crypto, or external input."
+                "injection. Call for any change touching auth, crypto, or external input. "
+                "Runs on MiniMax for architectural diversity."
             ),
             "system_prompt": SECURITY_INSTRUCTIONS,
             "tools": [*review_tools, web_search],
+            "model": review_model,
         },
     ]
