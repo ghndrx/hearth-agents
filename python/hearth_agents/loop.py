@@ -8,7 +8,6 @@ features so we don't incinerate the MiniMax quota (4500 req/5hr on Plus).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any
 
 from .backlog import Backlog, Feature
@@ -71,42 +70,14 @@ async def run_once(agent: Any, backlog: Backlog) -> bool:
         log.exception("feature_failed", id=feature.id, error=str(e))
         backlog.set_status(feature.id, "blocked")
 
-    # After any product feature completes, auto-enqueue a fresh self-tune task
-    # so the agent reflects on its own log before tackling the next product
-    # feature. Self-improvement features never trigger more self-improvement
-    # (would loop forever).
-    if not feature.self_improvement:
-        _enqueue_self_tune(backlog, trigger_feature_id=feature.id)
+    # Auto-enqueued self-tune after every product feature was removed: those
+    # features kept blocking on acceptance gates (new-test requirement, reviewer
+    # APPROVE) because prompt-file edits are hard to unit-test. The seeded
+    # ``self-prompt-tuning`` feature stays in the backlog for deliberate runs;
+    # we just don't fire a fresh one after every product feature anymore.
     return True
 
 
-def _enqueue_self_tune(backlog: Backlog, trigger_feature_id: str) -> None:
-    """Queue a self-tune feature that reads the agent's own log and tightens
-    whichever prompt produced the worst tool-call ratio on the previous run."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    feature_id = f"self-tune-after-{trigger_feature_id}-{ts}"
-    backlog.add(
-        Feature(
-            id=feature_id,
-            name=f"Self-tune prompts after {trigger_feature_id}",
-            description=(
-                f"Analyze the run log for feature ``{trigger_feature_id}`` just completed. "
-                f"Read ``/app/logs/hearth-agents.log`` (or ``/tmp/hearth-agents.log`` in dev). "
-                "Build a histogram of tool-call names. Identify anti-patterns: "
-                "read:write ratio >10:1, >5 wikidelve_search calls, >2 wikidelve_research "
-                "calls, or prose responses instead of tool calls. Edit "
-                "``python/hearth_agents/prompts.py`` to tighten whichever prompt "
-                "produced the anti-pattern. One focused commit on a feature branch, "
-                "``feat(prompts): tighten after <trigger_feature_id>``. Open a PR."
-            ),
-            priority="high",
-            repos=["hearth-agents"],
-            research_topics=[],
-            discord_parity="(self-improvement)",
-            self_improvement=True,
-        )
-    )
-    log.info("self_tune_enqueued", trigger=trigger_feature_id, id=feature_id)
 
 
 async def run_forever(backlog: Backlog, agent: Any) -> None:
