@@ -21,14 +21,15 @@ import httpx
 from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
-from .models import build_minimax
+from .models import build_kimi, build_minimax
 from .notify import Notifier
 
 IDEA_INTERVAL_SEC = 1800  # normal cadence: 30 minutes between top-ups
 IDEA_RETRY_SEC = 60       # fast retry when last generation added 0 (parse failure / dupes)
-IDEA_LOW_WATER = 5        # generate when fewer than this many product features pend
-IDEA_BATCH = 10           # ask MiniMax for this many ideas per generation
+IDEA_LOW_WATER = 15       # keep at least this many product features pending so workers never idle
+IDEA_BATCH = 20           # ask MiniMax for this many ideas per generation
 WIKIDELVE_HINT_LIMIT = 8  # how many KB titles to feed in as grounding
+REVIEW_MIN_SCORE = 3      # Kimi gate: reject ideas scoring below this on either axis
 
 
 _SYSTEM_PROMPT = """You are a product strategist for Hearth, a self-hosted, federated, open-source \
@@ -111,8 +112,71 @@ def _parse_ideas(text: str) -> list[dict[str, Any]]:
         return []
 
 
-async def _generate_once(backlog: Backlog, model: Any) -> int:
-    """Ask MiniMax for ideas, append valid ones to backlog. Returns count added."""
+_REVIEWER_PROMPT = """You are a senior engineer reviewing proposed feature ideas for the \
+Hearth product backlog. For each idea you receive, score it 1-5 on two axes:
+
+- implementability: can a coding agent build this in one focused sitting? (5 = clearly yes, \
+1 = vague/research-level/multi-week)
+- uniqueness: is this distinct from existing backlog features and a real product win? \
+(5 = novel + valuable, 1 = duplicate or trivial restating)
+
+Then pick verdict: "accept" if both scores >= 3, else "reject".
+
+Return ONLY a JSON object: {"implementability": int, "uniqueness": int, "verdict": "accept"|"reject", "reason": "one short sentence"}"""
+
+
+def _parse_review(text: str) -> dict[str, Any] | None:
+    """Same lenient JSON extraction as _parse_ideas, but for a single object."""
+    text = text.strip()
+    while "<think>" in text and "</think>" in text:
+        start = text.index("<think>")
+        end = text.index("</think>") + len("</think>")
+        text = (text[:start] + text[end:]).strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.rsplit("```", 1)[0].strip()
+    if "{" in text and "}" in text:
+        text = text[text.index("{"): text.rindex("}") + 1]
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+async def _review_idea(reviewer: Any, idea: dict[str, Any], existing_titles: list[str]) -> tuple[bool, str]:
+    """Kimi gate: returns (accept, reason). Failures default to accept (don't block on reviewer outage)."""
+    if reviewer is None:
+        return True, "review-skipped (no reviewer configured)"
+    user = (
+        f"Existing backlog titles:\n  - " + "\n  - ".join(existing_titles[-30:]) +
+        f"\n\nProposed idea:\n{json.dumps(idea, indent=2)}"
+    )
+    try:
+        resp = await reviewer.ainvoke([
+            {"role": "system", "content": _REVIEWER_PROMPT},
+            {"role": "user", "content": user},
+        ])
+    except Exception as e:
+        log.warning("idea_review_failed", id=idea.get("id"), error=str(e))
+        return True, "review-skipped (reviewer error)"
+    parsed = _parse_review(resp.content if hasattr(resp, "content") else str(resp))
+    if not parsed:
+        return True, "review-skipped (unparseable)"
+    impl = int(parsed.get("implementability", 0) or 0)
+    uniq = int(parsed.get("uniqueness", 0) or 0)
+    verdict = parsed.get("verdict", "")
+    accept = verdict == "accept" and impl >= REVIEW_MIN_SCORE and uniq >= REVIEW_MIN_SCORE
+    return accept, f"impl={impl} uniq={uniq} {parsed.get('reason','')[:120]}"
+
+
+async def _generate_once(backlog: Backlog, model: Any, reviewer: Any) -> tuple[int, int]:
+    """Ask MiniMax for ideas, gate each through Kimi, append accepted ones.
+
+    Returns (accepted, rejected).
+    """
     hints = await _wikidelve_hints()
     user = _user_prompt(backlog, hints)
     try:
@@ -122,14 +186,29 @@ async def _generate_once(backlog: Backlog, model: Any) -> int:
         ])
     except Exception as e:
         log.warning("idea_minimax_failed", error=str(e))
-        return 0
+        return 0, 0
 
     ideas = _parse_ideas(resp.content if hasattr(resp, "content") else str(resp))
     valid_repos = {"hearth", "hearth-desktop", "hearth-mobile"}
-    added = 0
+    existing_titles = [f.name for f in backlog.features]
+    accepted = 0
+    rejected = 0
+
     for raw in ideas:
         if not isinstance(raw, dict) or "id" not in raw or "name" not in raw:
+            rejected += 1
             continue
+        if any(f.id == str(raw["id"]) for f in backlog.features):
+            rejected += 1
+            log.info("idea_rejected", id=raw.get("id"), reason="duplicate-id")
+            continue
+
+        accept, reason = await _review_idea(reviewer, raw, existing_titles)
+        if not accept:
+            rejected += 1
+            log.info("idea_rejected", id=raw.get("id"), reason=reason)
+            continue
+
         repos = [r for r in raw.get("repos", ["hearth"]) if r in valid_repos] or ["hearth"]
         feature = Feature(
             id=str(raw["id"]),
@@ -141,9 +220,12 @@ async def _generate_once(backlog: Backlog, model: Any) -> int:
             discord_parity=str(raw.get("discord_parity", "")),
         )
         if backlog.add(feature):
-            added += 1
-            log.info("idea_added", id=feature.id, name=feature.name)
-    return added
+            accepted += 1
+            existing_titles.append(feature.name)
+            log.info("idea_added", id=feature.id, name=feature.name, review=reason)
+        else:
+            rejected += 1
+    return accepted, rejected
 
 
 async def run_idea_engine(backlog: Backlog) -> None:
@@ -152,8 +234,9 @@ async def run_idea_engine(backlog: Backlog) -> None:
         log.info("idea_engine_disabled", reason="no_minimax_key")
         return
     model = build_minimax()
+    reviewer = build_kimi() if settings.kimi_api_key else None
     notifier = Notifier()
-    log.info("idea_engine_started", interval_sec=IDEA_INTERVAL_SEC, low_water=IDEA_LOW_WATER)
+    log.info("idea_engine_started", interval_sec=IDEA_INTERVAL_SEC, low_water=IDEA_LOW_WATER, reviewer=bool(reviewer))
     try:
         while True:
             pending_product = [
@@ -163,10 +246,12 @@ async def run_idea_engine(backlog: Backlog) -> None:
             sleep_for = IDEA_INTERVAL_SEC
             if len(pending_product) < IDEA_LOW_WATER:
                 log.info("idea_generating", pending_product=len(pending_product))
-                added = await _generate_once(backlog, model)
-                log.info("idea_generation_done", added=added)
-                if added > 0:
-                    await notifier.send(f"💡 idea engine added {added} product features")
+                accepted, rejected = await _generate_once(backlog, model, reviewer)
+                log.info("idea_generation_done", accepted=accepted, rejected=rejected)
+                if accepted > 0:
+                    await notifier.send(
+                        f"💡 idea engine: +{accepted} accepted, {rejected} rejected by review"
+                    )
                 else:
                     sleep_for = IDEA_RETRY_SEC
             await asyncio.sleep(sleep_for)
