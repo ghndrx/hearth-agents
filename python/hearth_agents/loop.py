@@ -15,6 +15,7 @@ from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
 from .notify import Notifier
+from .verify import verify_changes
 
 # Short sleep between features — the provider-level rate limits (Kimi 4h window,
 # MiniMax 4500/5hr) are the real throttle; adding a long inter-feature sleep on
@@ -66,11 +67,17 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier) -> bool:
     try:
         result = await agent.ainvoke({"messages": [{"role": "user", "content": _feature_prompt(feature)}]})
         last = result["messages"][-1].content if result.get("messages") else ""
-        verdict = "blocked" if "blocked" in last.lower()[:200] else "done"
+        claimed = "blocked" if "blocked" in last.lower()[:200] else "done"
+        # Override the agent's self-reported verdict: if no worktree has
+        # commits beyond base, the feature did not actually ship regardless
+        # of what the agent's final message said.
+        ok, reason = verify_changes(feature)
+        verdict = claimed if (claimed == "blocked" or ok) else "blocked"
         backlog.set_status(feature.id, verdict)
-        log.info("feature_end", id=feature.id, verdict=verdict)
+        log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason)
         emoji = "✅" if verdict == "done" else "⛔"
-        await notifier.send(f"{emoji} {verdict} {feature.id}: {feature.name}")
+        suffix = "" if verdict == claimed else f" (agent claimed {claimed}; {reason})"
+        await notifier.send(f"{emoji} {verdict} {feature.id}: {feature.name}{suffix}")
     except Exception as e:
         log.exception("feature_failed", id=feature.id, error=str(e))
         backlog.set_status(feature.id, "blocked")
