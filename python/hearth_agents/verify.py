@@ -21,6 +21,10 @@ from .logger import log
 # a single prompt are almost always unfocused or hallucinated. Blocking them
 # forces the agent to split work into smaller PRs.
 DIFF_LINE_CAP = 600
+# Block any single function exceeding this cyclomatic complexity. Research on
+# AI-generated code quality names cyclomatic complexity as the strongest
+# differentiator; 10 is the classic McCabe threshold.
+MAX_FUNCTION_COMPLEXITY = 10
 
 
 def _has_commits(worktree: Path, base: str) -> bool:
@@ -63,6 +67,55 @@ def _diff_stat(worktree: Path, base: str) -> int:
         return total
     except subprocess.TimeoutExpired:
         return -1
+
+
+def _complexity_check(worktree: Path, repo_name: str) -> tuple[bool, str]:
+    """Reject features whose diff adds any function with cyclomatic complexity > threshold.
+
+    Python: ``radon cc -s -n E`` lists only grade E (very complex). We treat
+    any E-or-worse function added by the diff as a block. Go: ``gocyclo -over N``
+    if the binary is on PATH. Other languages default to pass.
+    """
+    if repo_name == "hearth-agents":
+        # Only flag functions in files the feature actually touched, not the
+        # whole codebase. `git diff --name-only base..HEAD -- *.py` narrows scope.
+        try:
+            files = subprocess.run(
+                ["git", "-C", str(worktree), "diff", "--name-only", "--diff-filter=AM",
+                 f"main..HEAD", "--", "*.py"],
+                capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.splitlines()
+        except subprocess.TimeoutExpired:
+            return True, "complexity skipped (git diff timeout)"
+        if not files:
+            return True, "complexity ok (no py files touched)"
+        try:
+            r = subprocess.run(
+                ["radon", "cc", "-s", "-n", "D", *files],
+                cwd=str(worktree), capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return True, "complexity skipped (radon unavailable)"
+        # radon prints nothing when all functions are below the threshold.
+        flagged = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+        if flagged:
+            return False, f"complexity too high (>{MAX_FUNCTION_COMPLEXITY}): {flagged[0][:160]}"
+        return True, "complexity ok"
+
+    if repo_name == "hearth":
+        try:
+            r = subprocess.run(
+                ["gocyclo", "-over", str(MAX_FUNCTION_COMPLEXITY), "backend"],
+                cwd=str(worktree), capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return True, "complexity skipped (gocyclo unavailable)"
+        if r.stdout.strip():
+            first = r.stdout.strip().splitlines()[0]
+            return False, f"complexity too high (>{MAX_FUNCTION_COMPLEXITY}): {first[:160]}"
+        return True, "complexity ok"
+
+    return True, "complexity not checked for this repo"
 
 
 def _run_tests(worktree: Path, repo_name: str) -> tuple[bool, str]:
@@ -126,6 +179,7 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
     pushed: list[str] = []
     oversized: list[str] = []
     test_failures: list[str] = []
+    complexity_failures: list[str] = []
 
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -146,6 +200,13 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
             oversized.append(f"{repo_name} ({lines} lines)")
             continue
 
+        # Complexity gate: any function with cyclomatic complexity over the
+        # threshold signals spaghetti the agent generated without refactoring.
+        ok, reason = _complexity_check(wt, repo_name)
+        if not ok:
+            complexity_failures.append(f"{repo_name}: {reason}")
+            continue
+
         # Test gate: if the repo has a known test command and it fails, block.
         ok, reason = _run_tests(wt, repo_name)
         if not ok:
@@ -159,6 +220,8 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
         return True, f"pushed to: {', '.join(pushed)}"
     if oversized:
         return False, f"diff too large (>{DIFF_LINE_CAP} lines): {', '.join(oversized)}"
+    if complexity_failures:
+        return False, "; ".join(complexity_failures)
     if test_failures:
         return False, "; ".join(test_failures)
     if committed:

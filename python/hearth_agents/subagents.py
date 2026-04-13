@@ -21,6 +21,7 @@ from .prompts import (
 from .tools import (
     git_commit,
     git_status,
+    repo_search,
     run_command,
     web_search,
     wikidelve_read,
@@ -36,8 +37,8 @@ def build_subagents() -> list[dict[str, Any]]:
     patterns is explicit: same-model review shares the reasoning patterns that
     produced the original errors, so use different architectures for review.
     """
-    dev_tools = [wikidelve_search, wikidelve_read, web_search, run_command, git_status, git_commit]
-    review_tools = [git_status, run_command, wikidelve_search, wikidelve_read]
+    dev_tools = [repo_search, wikidelve_search, wikidelve_read, web_search, run_command, git_status, git_commit]
+    review_tools = [repo_search, git_status, run_command, wikidelve_search, wikidelve_read]
     # Build once so both reviewer + security share the client / connection pool.
     review_model = build_minimax()
 

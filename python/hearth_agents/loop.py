@@ -151,7 +151,7 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
     # research shows multi-turn reflection can hurt accuracy by ~40% if
     # unbounded, so keep this tight.
     MAX_FIXUPS = 2
-    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally")
+    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high")
 
     try:
         attempt = 0
