@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     per_feature_budget_usd: float = 2.0
     minimax_rate_limit: int = 4500  # per 5-hour window
     max_concurrent_subagents: int = 3
+    loop_workers: int = 1
 
     # Server
     server_host: str = "0.0.0.0"
