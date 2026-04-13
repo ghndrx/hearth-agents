@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     telegram_allowed_chat_ids: str = Field(
         default="", description="Comma-separated chat IDs allowed to use the bot"
     )
+    telegram_notify_chat_id: int = 0
 
     # GitHub webhooks
     github_webhook_secret: str = ""
