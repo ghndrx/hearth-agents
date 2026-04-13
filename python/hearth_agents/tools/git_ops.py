@@ -9,6 +9,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from ..config import settings
 from ..logger import log
 
 
@@ -276,3 +277,44 @@ def git_worktree_remove(worktree_path: str, delete_branch: bool = True) -> str:
         _run(["git", "branch", "-D", branch], cwd=repo_path, timeout=10)
     _run(["git", "worktree", "prune"], cwd=repo_path, timeout=10)
     return out or f"removed {wt}" if code == 0 else f"remove failed: {out}"
+
+
+@tool
+def git_push(repo_path: str, branch: str, set_upstream: bool = True) -> str:
+    """Push a branch to origin.
+
+    Uses GITHUB_TOKEN from environment/config for authentication.
+    Automatically injects the token into the remote URL if present.
+
+    Args:
+        repo_path: Absolute path to the repo/worktree.
+        branch: Branch name to push.
+        set_upstream: Whether to set upstream tracking (-u flag). Default True.
+    """
+    token = settings.github_token
+    original_url = ""
+    if token:
+        # Temporarily inject token into remote URL for this push
+        code, original_url = _run(["git", "remote", "get-url", "origin"], cwd=repo_path, timeout=10)
+        # Convert https://github.com/user/repo.git -> https://oauth2:TOKEN@github.com/user/repo.git
+        if (
+            code == 0
+            and original_url
+            and original_url.startswith("https://")
+            and "@" not in original_url.replace("://", "").split("/")[0]
+        ):
+            new_url = original_url.replace("https://", f"https://oauth2:{token}@")
+            _run(["git", "remote", "set-url", "origin", new_url], cwd=repo_path, timeout=10)
+
+    cmd = ["git", "push"]
+    if set_upstream:
+        cmd.append("-u")
+    cmd.extend(["origin", branch])
+
+    code, out = _run(cmd, cwd=repo_path, timeout=30)
+
+    if token and original_url:
+        # Restore original URL without token for security
+        _run(["git", "remote", "set-url", "origin", original_url], cwd=repo_path, timeout=10)
+
+    return out if code == 0 else f"push failed: {out}"

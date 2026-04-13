@@ -327,7 +327,7 @@ def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
 Reason: {fixup}
 
 Fix ONLY what caused the failure. Do not re-implement. Do not revert unrelated
-changes. Run the tests again in the worktree and push when green. If the same
+changes. Run the tests again in the worktree and push when green using ``git_push``. If the same
 failure recurs, report it as blocked rather than looping.
 
 Target repos: {repos}

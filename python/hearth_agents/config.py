@@ -81,7 +81,8 @@ class Settings(BaseSettings):
     )
     telegram_notify_chat_id: int = 0
 
-    # GitHub webhooks
+    # GitHub
+    github_token: str = ""
     github_webhook_secret: str = ""
 
     # Persistence

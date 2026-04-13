@@ -156,7 +156,7 @@ Never declare success on unverified code.
   - Conventional Commits: ``feat: ...``, ``fix: ...``, ``docs: ...``.
   - Branch naming: ``feat/<feature-id>``.
   - Never add ``Co-Authored-By`` or AI attribution.
-  - After commit, ``run_command`` ``git push -u origin <branch>`` from the worktree.
+  - After commit, call ``git_push(repo_path=worktree_path, branch="feat/<feature-id>")``.
 """
 
 

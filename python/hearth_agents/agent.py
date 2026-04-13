@@ -17,6 +17,7 @@ from .subagents import build_subagents
 from .tools import (
     git_branch_create,
     git_commit,
+    git_push,
     git_status,
     git_worktree_add,
     git_worktree_remove,
@@ -44,6 +45,7 @@ ORCHESTRATOR_TOOLS = [
     run_command,
     git_status,
     git_commit,
+    git_push,
     git_branch_create,
     git_worktree_add,
     git_worktree_remove,
