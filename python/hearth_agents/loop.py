@@ -30,13 +30,55 @@ _CLAIM_LOCK = asyncio.Lock()
 _self_improv_active = 0
 
 
-def _feature_prompt(feature: Feature) -> str:
-    """Build the human message that kicks off the DeepAgent for one feature."""
+def _load_agents_md(feature: Feature) -> str:
+    """Concatenate AGENTS.md from each target repo so the agent inherits repo
+    conventions (stack, test command, style, do-not-touch list, security) before
+    it starts implementing. Missing files are skipped silently.
+    """
+    from pathlib import Path as _P
+    blocks: list[str] = []
+    for repo_name in feature.repos:
+        repo_path = settings.repo_paths.get(repo_name)
+        if not repo_path:
+            continue
+        agents_md = _P(repo_path) / "AGENTS.md"
+        if agents_md.exists():
+            try:
+                blocks.append(f"### {repo_name}/AGENTS.md\n\n{agents_md.read_text()[:6000]}")
+            except OSError:
+                continue
+    return "\n\n---\n\n".join(blocks) if blocks else ""
+
+
+def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
+    """Build the human message that kicks off the DeepAgent for one feature.
+
+    When ``fixup`` is provided, the prompt is shaped as a retry: it tells the
+    agent its previous attempt failed verification and asks for a focused fix
+    rather than re-implementing from scratch.
+    """
     repos = ", ".join(feature.repos)
     research = "\n  - ".join(feature.research_topics) if feature.research_topics else "(none)"
     repo_paths = "\n".join(
         f"  {name}: {path}" for name, path in settings.repo_paths.items() if name in feature.repos
     )
+    agents_md = _load_agents_md(feature)
+    conventions_block = f"\n\nRepo conventions (from AGENTS.md):\n\n{agents_md}\n" if agents_md else ""
+
+    if fixup:
+        return f"""Your previous attempt at feature ``{feature.id}`` failed verification.
+
+Reason: {fixup}
+
+Fix ONLY what caused the failure. Do not re-implement. Do not revert unrelated
+changes. Run the tests again in the worktree and push when green. If the same
+failure recurs, report it as blocked rather than looping.
+
+Target repos: {repos}
+Repo paths:
+{repo_paths}
+{conventions_block}"""
+
     return f"""Implement feature ``{feature.id}``.
 
 Name: {feature.name}
@@ -56,7 +98,7 @@ Research topics to check wikidelve for first:
 Follow the orchestrator workflow: search → plan → worktree per repo → delegate
 to ``developer`` → verify with ``git_status`` → delegate to ``reviewer`` →
 commit on approval. Skip PR creation if implementation produced zero file changes.
-"""
+{conventions_block}"""
 
 
 async def _claim_next(backlog: Backlog) -> Feature | None:
@@ -100,22 +142,49 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
     tag = f"[w{worker_id}]"
     await notifier.send(f"▶️ {tag} {kind} [{feature.priority}] {feature.id}: {feature.name}")
 
+    # Bounded self-correction: if the verifier blocks on a fixable reason
+    # (failing tests, oversized diff), give the agent up to MAX_FIXUPS chances
+    # to fix it. Abort immediately on loop signature (same reason twice) —
+    # research shows multi-turn reflection can hurt accuracy by ~40% if
+    # unbounded, so keep this tight.
+    MAX_FIXUPS = 2
+    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally")
+
     try:
-        result = await asyncio.wait_for(
-            agent.ainvoke({"messages": [{"role": "user", "content": _feature_prompt(feature)}]}),
-            timeout=settings.per_feature_timeout_sec,
-        )
-        last = result["messages"][-1].content if result.get("messages") else ""
-        claimed = "blocked" if "blocked" in last.lower()[:200] else "done"
-        # Override the agent's self-reported verdict: if no worktree has
-        # commits beyond base, the feature did not actually ship regardless
-        # of what the agent's final message said.
-        ok, reason = verify_changes(feature)
-        verdict = claimed if (claimed == "blocked" or ok) else "blocked"
+        attempt = 0
+        fixup: str | None = None
+        prior_reason: str | None = None
+        verdict = "blocked"
+        reason = "not run"
+        claimed = "blocked"
+
+        while attempt <= MAX_FIXUPS:
+            prompt = _feature_prompt(feature, fixup=fixup)
+            result = await asyncio.wait_for(
+                agent.ainvoke({"messages": [{"role": "user", "content": prompt}]}),
+                timeout=settings.per_feature_timeout_sec,
+            )
+            last = result["messages"][-1].content if result.get("messages") else ""
+            claimed = "blocked" if "blocked" in last.lower()[:200] else "done"
+            ok, reason = verify_changes(feature)
+            verdict = claimed if (claimed == "blocked" or ok) else "blocked"
+            if verdict == "done":
+                break
+            if not any(reason.startswith(p) for p in FIXABLE_PREFIXES):
+                break  # non-fixable blocks (e.g. no worktree at all) won't improve
+            if reason == prior_reason:
+                log.warning("feature_deadlock", id=feature.id, reason=reason, attempt=attempt)
+                break  # loop signature — same failure twice, bail
+            prior_reason = reason
+            fixup = reason
+            attempt += 1
+            log.info("feature_fixup", id=feature.id, attempt=attempt, reason=reason)
+            await notifier.send(f"🔄 [w{worker_id}] retry {attempt}/{MAX_FIXUPS} {feature.id}: {reason[:120]}")
+
         backlog.set_status(feature.id, verdict)
-        log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason)
+        log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason, attempts=attempt + 1)
         emoji = "✅" if verdict == "done" else "⛔"
-        suffix = "" if verdict == claimed else f" (agent claimed {claimed}; {reason})"
+        suffix = "" if verdict == claimed and attempt == 0 else f" ({reason}; attempts={attempt + 1})"
         await notifier.send(f"{emoji} [w{worker_id}] {verdict} {feature.id}: {feature.name}{suffix}")
     except asyncio.TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
