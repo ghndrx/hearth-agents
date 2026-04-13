@@ -125,18 +125,23 @@ def _run_tests(worktree: Path, repo_name: str) -> tuple[bool, str]:
     isn't installed, we pass (don't block shipping on missing infra). Only a
     real, non-zero exit with discovered tests counts as failure.
     """
-    commands: dict[str, list[str]] = {
-        "hearth-agents": ["pytest", "python/tests", "-x", "--tb=short", "-q"],
-        "hearth": ["go", "test", "./..."],
-        "hearth-desktop": ["pnpm", "test", "--", "--run"],
-        "hearth-mobile": ["pnpm", "test", "--", "--run"],
+    # Per-repo: (cwd relative to worktree, env overrides, command)
+    commands: dict[str, tuple[str, dict[str, str], list[str]]] = {
+        "hearth-agents": ("python", {"PYTHONPATH": "."}, ["pytest", "tests", "-x", "--tb=short", "-q"]),
+        "hearth": ("backend", {}, ["go", "test", "./..."]),
+        "hearth-desktop": (".", {}, ["pnpm", "test", "--", "--run"]),
+        "hearth-mobile": (".", {}, ["pnpm", "test", "--", "--run"]),
     }
-    cmd = commands.get(repo_name)
-    if not cmd:
+    spec = commands.get(repo_name)
+    if not spec:
         return True, "no test command known"
+    subdir, env_overrides, cmd = spec
+    import os as _os
+    env = {**_os.environ, **env_overrides}
     try:
         r = subprocess.run(
-            cmd, cwd=str(worktree), capture_output=True, text=True, timeout=300, check=False
+            cmd, cwd=str(worktree / subdir), env=env,
+            capture_output=True, text=True, timeout=300, check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return True, f"tests skipped: {e.__class__.__name__}"
