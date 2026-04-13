@@ -18,6 +18,13 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# The container runs as root but the bind-mounted /repos are owned by the host
+# user (uid 1000). Without this, git refuses every worktree op with "dubious
+# ownership" and every product feature fails at worktree_add.
+RUN git config --global --add safe.directory '*' \
+    && git config --global user.email "agent@hearth-agents.local" \
+    && git config --global user.name "Hearth Agents"
+
 WORKDIR /app
 COPY --from=builder /app /app
 

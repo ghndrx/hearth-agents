@@ -14,6 +14,7 @@ from typing import Any
 from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
+from .memory import block_for_prompt, record_done
 from .notify import Notifier
 from .verify import verify_changes
 
@@ -64,6 +65,8 @@ def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
     )
     agents_md = _load_agents_md(feature)
     conventions_block = f"\n\nRepo conventions (from AGENTS.md):\n\n{agents_md}\n" if agents_md else ""
+    memory_block = block_for_prompt(list(feature.repos))
+    memory_prefix = f"\n\nRecent prior work in these repos (for context, don't duplicate):\n\n{memory_block}\n" if memory_block else ""
 
     if fixup:
         return f"""Your previous attempt at feature ``{feature.id}`` failed verification.
@@ -98,7 +101,7 @@ Research topics to check wikidelve for first:
 Follow the orchestrator workflow: search → plan → worktree per repo → delegate
 to ``developer`` → verify with ``git_status`` → delegate to ``reviewer`` →
 commit on approval. Skip PR creation if implementation produced zero file changes.
-{conventions_block}"""
+{memory_prefix}{conventions_block}"""
 
 
 async def _claim_next(backlog: Backlog) -> Feature | None:
@@ -182,6 +185,13 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
             await notifier.send(f"🔄 [w{worker_id}] retry {attempt}/{MAX_FIXUPS} {feature.id}: {reason[:120]}")
 
         backlog.set_status(feature.id, verdict)
+        if verdict == "done":
+            record_done(
+                feature.id,
+                feature.name,
+                list(feature.repos),
+                f"{feature.name} — {reason}. Priority {feature.priority}.",
+            )
         log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason, attempts=attempt + 1)
         emoji = "✅" if verdict == "done" else "⛔"
         suffix = "" if verdict == claimed and attempt == 0 else f" ({reason}; attempts={attempt + 1})"
