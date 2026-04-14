@@ -236,9 +236,23 @@ async def run_idea_engine(backlog: Backlog) -> None:
     model = build_minimax()
     reviewer = build_kimi() if settings.kimi_api_key else None
     notifier = Notifier()
-    log.info("idea_engine_started", interval_sec=IDEA_INTERVAL_SEC, low_water=IDEA_LOW_WATER, reviewer=bool(reviewer))
+    log.info(
+        "idea_engine_started",
+        interval_sec=IDEA_INTERVAL_SEC,
+        low_water=IDEA_LOW_WATER,
+        reviewer=bool(reviewer),
+        product_features_enabled=settings.product_features_enabled,
+    )
     try:
         while True:
+            # Skip product generation when the platform is scoped to self-improvement
+            # only. The agent still works on existing product features in the
+            # backlog and on self-improvements; we just stop ADDING new product
+            # features until the block rate comes down.
+            if not settings.product_features_enabled:
+                await asyncio.sleep(IDEA_INTERVAL_SEC)
+                continue
+
             pending_product = [
                 f for f in backlog.features
                 if f.status == "pending" and not f.self_improvement

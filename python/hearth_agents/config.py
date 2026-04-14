@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     hearth_mobile_path: str = "/repos/hearth-mobile"
     hearth_agents_path: str = "/repos/hearth-agents"
 
+    # When True, the idea engine queues product features for all Hearth repos.
+    # Default False: pause product-feature generation while block rate is high
+    # (research flags <80% task success as capability mismatch, not tuning).
+    # The agent still works on already-pending product features and all
+    # self-improvements against hearth-agents. Flip via env when block rate
+    # drops below 30% on a sustained window.
+    product_features_enabled: bool = False
+
     # Budget & rate limits
     daily_budget_usd: float = 5.0
     per_feature_budget_usd: float = 2.0
