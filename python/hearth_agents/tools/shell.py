@@ -52,6 +52,28 @@ def run_command(command: str, cwd: str, timeout_sec: int = 120) -> str:
     """
     if not _allowed_root(cwd):
         return f"error: cwd {cwd} is outside configured repo roots"
+    # Route git commit (and its push) through the ``git_commit`` tool so the
+    # auto-push guarantee holds. Raw ``git commit`` calls via run_command were
+    # the dominant 'committed locally but never pushed' failure — the tool
+    # atomicity only helps if the tool is used. Detection matches ``git commit``
+    # as a whole word ignoring leading ``sudo`` or chains like ``cd X && git commit``.
+    import re as _re
+    if _re.search(r"(?<![A-Za-z0-9_-])git\s+commit\b", command):
+        return (
+            "error: raw ``git commit`` via run_command is disallowed. "
+            "Use the ``git_commit(repo_path, message)`` tool instead — it "
+            "commits AND pushes atomically. Bypassing it caused the "
+            "'committed locally but never pushed' failure in 7+ recent features."
+        )
+    # Same for raw pushes: they usually pair with a bypassed commit and race
+    # the tool path. ``git_commit`` already pushes; explicit pushes are
+    # unnecessary and obscure the failure mode when they fail.
+    if _re.search(r"(?<![A-Za-z0-9_-])git\s+push\b", command):
+        return (
+            "error: raw ``git push`` via run_command is disallowed. "
+            "``git_commit`` pushes automatically. If the prior commit went "
+            "through run_command (also disallowed), redo it with ``git_commit``."
+        )
     timeout = min(timeout_sec, _TIMEOUT)
     try:
         r = subprocess.run(
