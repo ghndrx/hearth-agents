@@ -214,7 +214,8 @@ async def run_once(
     log.info("feature_start", id=feature.id, priority=feature.priority, worker=worker_id)
     kind = "🔧 self-improve" if feature.self_improvement else "🚀 product"
     tag = f"[w{worker_id}]"
-    await notifier.send(f"▶️ {tag} {kind} [{feature.priority}] {feature.id}: {feature.name}")
+    # Noisy per-feature-start pings removed — feature_end is enough signal,
+    # and the log still carries full start/stop events for debugging.
 
     # Bounded self-correction: if the verifier blocks on a fixable reason
     # (failing tests, oversized diff), give the agent up to MAX_FIXUPS chances
@@ -253,7 +254,8 @@ async def run_once(
             fixup = reason
             attempt += 1
             log.info("feature_fixup", id=feature.id, attempt=attempt, reason=reason)
-            await notifier.send(f"🔄 [w{worker_id}] retry {attempt}/{MAX_FIXUPS} {feature.id}: {reason[:120]}")
+            # In-loop retries are transient — only log them. The final
+            # feature_end notification will include "attempts=N" if it matters.
 
         backlog.set_status(feature.id, verdict)
         if verdict == "done":
@@ -269,9 +271,13 @@ async def run_once(
                 f"{feature.name} — {reason}. Priority {feature.priority}.",
             )
         log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason, attempts=attempt + 1)
-        emoji = "✅" if verdict == "done" else "⛔"
-        suffix = "" if verdict == claimed and attempt == 0 else f" ({reason}; attempts={attempt + 1})"
-        await notifier.send(f"{emoji} [w{worker_id}] {verdict} {feature.id}: {feature.name}{suffix}")
+        # Only ping Telegram for successes. Failures get batched by the healer
+        # (🩹) and escalations (🚨). Per-feature blocks were the biggest source
+        # of noise — they were firing dozens of times per hour while healer
+        # loops resurrected and re-blocked the same features.
+        if verdict == "done":
+            suffix = "" if attempt == 0 else f" (attempts={attempt + 1})"
+            await notifier.send(f"✅ [w{worker_id}] done {feature.id}: {feature.name}{suffix}")
     except asyncio.TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
         backlog.set_status(feature.id, "blocked")
