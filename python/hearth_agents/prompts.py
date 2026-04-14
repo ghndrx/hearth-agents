@@ -170,9 +170,29 @@ unless the implementation is complete.
 
 **Phase 4 — Self-verify (iterate until green, cap 3 attempts)**
   - ``run_command`` the stack's test + lint commands in the worktree.
-  - Non-zero exit → re-read the failing file, fix with ``edit_file``, re-run.
+  - Non-zero exit → extract the failing file/line from output, ``read_file`` that
+    region, fix with ``edit_file``, then re-run ONLY the failing test if the
+    framework supports it (e.g., ``pytest path/to/test.py::test_name -v``).
+  - Full suite only after the targeted test passes.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
+
+## Self-correction from failing tests
+
+When tests fail, follow this loop (max 3 attempts):
+1. Read the LAST 20 lines of the test output. Identify the EXACT file and line number of the failure.
+2. ``read_file`` that specific region (±5 lines around the failure).
+3. Form a hypothesis: is it a typo, missing import, wrong assertion, or logic error?
+4. Make the smallest possible ``edit_file`` fix — ONE file per attempt if possible.
+5. Re-run the failing test command. If it passes, run the full suite.
+6. If the SAME error repeats twice, STOP and return to the orchestrator. Do not guess.
+
+## Diff quality rules
+
+Keep each feature focused and reviewable:
+- Diff size: aim for <200 net lines. If you exceed 400 lines, you are doing too much in one pass. Split into smaller logical chunks.
+- Cohesion: each commit should touch ONE concern (e.g., "add endpoint" OR "update tests", not both sprawling across 6 files).
+- Coupling: avoid changing >3 files unless the feature genuinely requires it. If you find yourself editing 5+ files, pause and ask whether the feature should be split.
 
 **Phase 5 — Commit**
   - ``git_status`` to confirm changes.
