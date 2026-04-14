@@ -24,6 +24,79 @@ from .verify import verify_changes
 # and not drown structlog in interleaved events.
 LOOP_INTERVAL_SEC = 30
 
+# Circuit breaker: if the block-rate in the last CIRCUIT_WINDOW_SEC exceeds
+# CIRCUIT_BLOCK_THRESHOLD, pause the loop for CIRCUIT_COOLDOWN_SEC. Prevents
+# burning API quota (and flooding Telegram) when something systemic is wrong —
+# e.g. all features are failing because an upstream dependency broke.
+CIRCUIT_WINDOW_SEC = 60 * 60       # evaluate block rate over the last hour
+CIRCUIT_MIN_SAMPLES = 5            # don't trip on tiny samples
+CIRCUIT_BLOCK_THRESHOLD = 0.70     # >70% blocked in window → trip
+CIRCUIT_COOLDOWN_SEC = 30 * 60     # pause this long before resuming
+
+# Sliding-window log of (wall_time, verdict) for circuit eval. Trimmed in place.
+_verdict_log: list[tuple[float, str]] = []
+_circuit_open_until: float = 0.0
+
+
+def _record_verdict(verdict: str) -> None:
+    import time as _t
+    now = _t.time()
+    _verdict_log.append((now, verdict))
+    cutoff = now - CIRCUIT_WINDOW_SEC
+    while _verdict_log and _verdict_log[0][0] < cutoff:
+        _verdict_log.pop(0)
+
+
+def _check_circuit_breaker() -> bool:
+    """Return True if the breaker should be OPEN (loop paused). Also mutates
+    ``_circuit_open_until`` to extend a cooldown when tripped fresh."""
+    import time as _t
+    now = _t.time()
+    if _circuit_open_until > now:
+        return True
+    if len(_verdict_log) < CIRCUIT_MIN_SAMPLES:
+        return False
+    blocked = sum(1 for _, v in _verdict_log if v == "blocked")
+    rate = blocked / len(_verdict_log)
+    if rate >= CIRCUIT_BLOCK_THRESHOLD:
+        globals()["_circuit_open_until"] = now + CIRCUIT_COOLDOWN_SEC
+        log.warning(
+            "circuit_breaker_tripped",
+            block_rate=round(rate, 2),
+            samples=len(_verdict_log),
+            cooldown_sec=CIRCUIT_COOLDOWN_SEC,
+        )
+        # Fire-and-forget Telegram alert — we're already in an async context
+        # indirectly (called from _worker's while loop). The send is safe to
+        # schedule via create_task and not await, so the breaker check stays
+        # synchronous.
+        try:
+            from .notify import Notifier as _N
+            _n = _N()
+            asyncio.create_task(_n.send(
+                f"🚨 circuit breaker OPEN — block rate {rate:.0%} over "
+                f"{len(_verdict_log)} features, pausing {CIRCUIT_COOLDOWN_SEC // 60}m"
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+    return False
+
+
+def circuit_state() -> dict:
+    """Snapshot of circuit breaker state. Used by /stats."""
+    import time as _t
+    now = _t.time()
+    blocked = sum(1 for _, v in _verdict_log if v == "blocked")
+    total = len(_verdict_log)
+    return {
+        "open": _circuit_open_until > now,
+        "open_for_sec": max(0, int(_circuit_open_until - now)),
+        "window_samples": total,
+        "window_blocked": blocked,
+        "block_rate": round(blocked / total, 2) if total else 0.0,
+    }
+
 # Per-provider cooldowns. Tracking primary (Kimi) and fallback (MiniMax)
 # separately is what stops the ping-pong: when both hit 429 at once, workers
 # only sleep if BOTH are cooled down. If only one is cooled, we route through
@@ -276,6 +349,7 @@ async def run_once(
             # feature_end notification will include "attempts=N" if it matters.
 
         backlog.set_status(feature.id, verdict)
+        _record_verdict(verdict)
         if verdict == "done":
             # Clear the heal hint so future re-runs (idea engine duplicates,
             # manual re-queues) start from a clean prompt instead of carrying
@@ -360,6 +434,16 @@ async def _worker(
       - Both cooled (or no fallback)      -> sleep until the soonest expiry
     """
     while True:
+        # Circuit breaker comes FIRST: if quality has collapsed we want to
+        # pause before burning any more API quota, even if we have fallback
+        # providers available.
+        if _check_circuit_breaker():
+            import time as _t
+            wait = max(30, int(_circuit_open_until - _t.time()))
+            log.info("circuit_breaker_open", worker=worker_id, sleep_sec=wait)
+            await asyncio.sleep(min(wait, 120))  # wake periodically to re-eval
+            continue
+
         now = asyncio.get_event_loop().time()
         primary_cool = _primary_cooldown_until > now
         fallback_cool = (

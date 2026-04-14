@@ -25,6 +25,50 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
     async def health() -> dict[str, Any]:
         return {"status": "ok", "stats": backlog.stats()}
 
+    @app.get("/stats")
+    async def stats() -> dict[str, Any]:
+        """Operational stats: backlog breakdown, recent velocity, split + heal
+        activity, circuit-breaker state. Exists so operators can diagnose
+        regressions without log-grepping."""
+        from .loop import _primary_cooldown_until, _fallback_cooldown_until, circuit_state
+        import asyncio as _asyncio
+        import time as _time
+
+        now_monotonic = _asyncio.get_event_loop().time()
+        now_wall = _time.time()
+
+        def _iso_age(iso: str) -> float:
+            from datetime import datetime as _dt
+            try:
+                return now_wall - _dt.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+            except Exception:  # noqa: BLE001
+                return float("inf")
+
+        window = 24 * 60 * 60  # last 24h
+        recent = [f for f in backlog.features if _iso_age(f.created_at) <= window]
+        healed = sum(1 for f in backlog.features if f.heal_attempts > 0)
+        split_children = sum(1 for f in backlog.features if f.parent_id)
+        hinted = sum(1 for f in backlog.features if f.heal_hint)
+
+        return {
+            "stats": backlog.stats(),
+            "recent_24h": {
+                "total": len(recent),
+                "done": sum(1 for f in recent if f.status == "done"),
+                "blocked": sum(1 for f in recent if f.status == "blocked"),
+            },
+            "heal": {
+                "features_with_heal_attempts": healed,
+                "features_carrying_hint": hinted,
+            },
+            "splitter": {"child_features": split_children},
+            "rate_limit": {
+                "primary_cooldown_sec": max(0, int(_primary_cooldown_until - now_monotonic)),
+                "fallback_cooldown_sec": max(0, int(_fallback_cooldown_until - now_monotonic)),
+            },
+            "circuit_breaker": circuit_state(),
+        }
+
     @app.post("/webhooks/github")
     async def github_webhook(request: Request) -> dict[str, Any]:
         raw = await request.body()

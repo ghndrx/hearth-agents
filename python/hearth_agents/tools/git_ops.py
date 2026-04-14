@@ -61,7 +61,18 @@ def git_status(repo_path: str) -> str:
         ["git", "diff", "--shortstat", f"{base}...HEAD"], cwd=repo_path, timeout=10
     )
     if dcode != 0 or not dout.strip():
-        return status
+        # On a feature branch with ZERO diff vs base — you've created the
+        # branch but haven't written anything yet. This is the canonical
+        # "no commits on any worktree" failure mode caught early. Nudge the
+        # agent explicitly rather than silently returning a bare status.
+        return (
+            f"{status}\n\n"
+            f"📝 branch {branch.strip()} has NO diff vs {base} yet. "
+            "If you've already read the relevant files, your next action "
+            "should be write_file or edit_file (not another read). If the "
+            "feature is genuinely blocked, return the message "
+            "'BLOCKED: <concrete reason>' instead of another exploratory read."
+        )
     # shortstat format: " 3 files changed, 47 insertions(+), 12 deletions(-)"
     import re as _re
     ins = sum(int(m) for m in _re.findall(r"(\d+) insertion", dout))

@@ -14,6 +14,12 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
+
+
+def _norm_name(name: str) -> str:
+    """Lowercase + alnum-only. Used for fuzzy dedup: "Auto Retention Policies"
+    and "auto-retention-policies" normalize to "autoretentionpolicies"."""
+    return "".join(c for c in name.lower() if c.isalnum())
 Repo = Literal["hearth", "hearth-desktop", "hearth-mobile", "hearth-agents"]
 
 
@@ -178,8 +184,22 @@ class Backlog:
                 return
 
     def add(self, feature: Feature) -> bool:
-        """Append a feature. Returns False if the ID already exists."""
+        """Append a feature. Returns False if the ID already exists OR the
+        name is near-duplicate of an existing non-done feature.
+
+        The fuzzy check is intentionally cheap: normalize to lowercase alnum
+        and compare equality of the full normalized name. This catches the
+        common idea-engine pattern of re-proposing the same feature with
+        slight punctuation/casing drift ("Auto Retention Policies" vs
+        "auto-retention-policies") while being too coarse to block genuinely
+        different features.
+        """
         if any(f.id == feature.id for f in self.features):
+            return False
+        norm = _norm_name(feature.name)
+        if norm and any(
+            f.status != "done" and _norm_name(f.name) == norm for f in self.features
+        ):
             return False
         self.features.append(feature)
         self.save()
