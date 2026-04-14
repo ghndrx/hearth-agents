@@ -296,14 +296,14 @@ def git_push(repo_path: str, branch: str, set_upstream: bool = True) -> str:
     if token:
         # Temporarily inject token into remote URL for this push
         code, original_url = _run(["git", "remote", "get-url", "origin"], cwd=repo_path, timeout=10)
-        # Convert https://github.com/user/repo.git -> https://oauth2:TOKEN@github.com/user/repo.git
-        if (
-            code == 0
-            and original_url
-            and original_url.startswith("https://")
-            and "@" not in original_url.replace("://", "").split("/")[0]
-        ):
-            new_url = original_url.replace("https://", f"https://oauth2:{token}@")
+        # Convert https://github.com/user/repo.git -> https://x-access-token:TOKEN@github.com/user/repo.git
+        # Note: GitHub requires x-access-token:TOKEN format (oauth2:TOKEN is deprecated)
+        if code == 0 and original_url and original_url.startswith("https://"):
+            # Strip any existing auth from URL
+            clean_url = original_url
+            if "@" in clean_url.replace("://", "").split("/")[0]:
+                clean_url = "https://" + clean_url.split("@", 1)[1]
+            new_url = f"https://x-access-token:{token}@{clean_url.replace('https://', '')}"
             _run(["git", "remote", "set-url", "origin", new_url], cwd=repo_path, timeout=10)
 
     cmd = ["git", "push"]
