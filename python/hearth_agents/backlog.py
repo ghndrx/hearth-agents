@@ -39,6 +39,10 @@ class Feature:
     # failure mode (e.g. opening a worktree and committing nothing). Cleared
     # by the loop on successful completion.
     heal_hint: str = ""
+    # If the splitter broke an over-broad feature into per-repo children,
+    # each child's parent_id points at the original. Lets us reconstruct
+    # the high-level intent and avoid re-splitting children recursively.
+    parent_id: str = ""
 
 
 # Initial backlog. The idea engine appends to this over time.

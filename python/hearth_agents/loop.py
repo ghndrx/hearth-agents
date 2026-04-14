@@ -170,27 +170,45 @@ async def _claim_next(backlog: Backlog) -> Feature | None:
     Holds ``_CLAIM_LOCK`` across the read+write so two concurrent workers can
     never grab the same feature. Also skips self-improvement features when one
     is already running — prompts.py is a shared file and parallel edits fight.
+
+    Before returning, runs the splitter: any candidate targeting multiple repos
+    is replaced with per-repo children and we re-select. Prevents the "one
+    attempt implements everything across 3 repos and blows through the diff
+    cap" failure mode (data-export-portability = 2649 lines, message-threading
+    = 443,603 lines).
     """
+    from .splitter import maybe_split
+
     global _self_improv_active
     async with _CLAIM_LOCK:
-        candidates = [f for f in backlog.features if f.status == "pending"]
-        if _self_improv_active > 0:
-            candidates = [f for f in candidates if not f.self_improvement]
-        if not candidates:
-            return None
-        priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        candidates.sort(
-            key=lambda f: (
-                0 if f.self_improvement else 1,
-                priority_order.get(f.priority, 99),
-                f.created_at,
+        # Split loop: keep re-selecting until we get a candidate that doesn't
+        # need splitting, or we run out of candidates. Bounded by backlog size
+        # so a pathological state can't spin.
+        for _ in range(len(backlog.features) + 1):
+            candidates = [f for f in backlog.features if f.status == "pending"]
+            if _self_improv_active > 0:
+                candidates = [f for f in candidates if not f.self_improvement]
+            if not candidates:
+                return None
+            priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            candidates.sort(
+                key=lambda f: (
+                    0 if f.self_improvement else 1,
+                    priority_order.get(f.priority, 99),
+                    f.created_at,
+                )
             )
-        )
-        feature = candidates[0]
-        backlog.set_status(feature.id, "implementing")
-        if feature.self_improvement:
-            _self_improv_active += 1
-        return feature
+            feature = candidates[0]
+            if maybe_split(backlog, feature):
+                # Parent was replaced by children; re-select so we pick a real
+                # implementable feature (one of the new children or something
+                # else that outranks them).
+                continue
+            backlog.set_status(feature.id, "implementing")
+            if feature.self_improvement:
+                _self_improv_active += 1
+            return feature
+        return None
 
 
 async def run_once(
