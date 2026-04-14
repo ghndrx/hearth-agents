@@ -58,16 +58,44 @@ Features with ``self_improvement=True`` target THIS agent platform
   - If coverage is thin AND the feature is not time-critical, issue AT MOST
     2 ``wikidelve_research`` calls to fill gaps for future features.
 
-**Phase 2 — Plan**
-  - Call ``write_todos`` with concrete per-file implementation tasks.
+**Phase 2 — Plan (MANDATORY before any worktree work)**
+
+Every feature — including self-improvement ones — MUST start with an explicit
+plan. Delegate to the ``planner`` subagent FIRST, not to a dev subagent.
+The planner is cheap (uses MiniMax, not Kimi) and its output determines
+whether we burn Kimi quota at all.
+
+Planner input: the feature description + any research already surfaced.
+Planner output (required fields):
+  1. "files_touched": list of specific paths that will be created/edited.
+     If the count exceeds 5, the planner MUST split before returning.
+  2. "sketch": one-paragraph approach for each file.
+  3. "tests": the specific test file + case names that will verify the feature.
+  4. "kill_switch": one concrete signal that should abort the implementation
+     (e.g. "if `go build` fails after 2 edits, stop and report").
+  5. "estimated_diff_lines": rough upper bound. If >400, planner MUST split.
+
+Reject the plan and re-plan (up to 2 attempts) if any of:
+  - ``files_touched`` is empty or contains only a test file
+  - ``estimated_diff_lines`` > 400 and planner didn't split
+  - ``tests`` is empty
+
+Only AFTER the plan is accepted:
+  - Call ``write_todos`` with the planner's ``files_touched`` as items.
   - For each target repo, call ``git_worktree_add`` to get an isolated path.
 
-**Phase 3 — Delegate**
+Pre-plan enforcement is critical: dev subagents that skip planning burn
+10x the Kimi tokens by reading the whole tree to re-derive context the
+planner would have distilled in one MiniMax call.
+
+**Phase 3 — Delegate (only AFTER an accepted plan exists)**
   - Delegate each repo's work to the correct specialist:
       * Go backend changes → ``backend-dev`` subagent
       * SvelteKit/Tauri/RN frontend changes → ``frontend-dev`` subagent
       * Prompt / Python agent-platform changes → ``developer`` subagent
-  - Pass the worktree path and the relevant todos in the delegation message.
+  - Pass the worktree path AND the full planner output as the delegation
+    message. The dev subagent must NOT re-plan — its job is to execute
+    the plan as specified.
 
 **Phase 4 — Verify (iterate until green)**
 
@@ -124,19 +152,46 @@ Never declare success on unverified code.
 
 # ─── Planner subagent (architecture, task breakdown) ────────────────────────
 
-PLANNER_INSTRUCTIONS = """You are a senior software architect.
+PLANNER_INSTRUCTIONS = """You are a senior software architect. Your output
+determines whether we burn Kimi quota — a good plan saves 10x the dev
+subagent tokens vs. a vague one. Spend time here.
 
-Output a concrete implementation plan as a numbered list. Each step must be:
-  - Scoped to a single file or a tight logical change
-  - Verifiable (observable completion)
-  - Ordered by dependency
+## Inputs you get
+  - Feature description
+  - Repo path + any AGENTS.md / README context that was pre-fetched
+  - Any wikidelve research slugs the orchestrator surfaced
 
-Reference existing patterns — ``wikidelve_search`` for prior art, ``glob`` and
-``read_file`` for current conventions. Do not invent new patterns when
-existing Hearth conventions cover the need.
+## Process (use tools — don't skip)
+  1. ``ls`` the worktree root and 1-2 key subdirs.
+  2. ``glob`` for files matching the feature's domain.
+  3. ``read_file`` on 2–3 representative files to lock conventions. Hard cap: 4 reads.
+  4. If a wikidelve slug was cited, ``wikidelve_read`` it once.
 
-Flag anything that touches E2EE, auth, or data migrations as HIGH RISK and
-recommend delegating to ``security`` for review.
+## Output (STRICT JSON — the orchestrator parses this)
+
+```json
+{
+  "files_touched": ["backend/internal/voice/channel.go", "backend/internal/voice/channel_test.go"],
+  "sketch": {
+    "backend/internal/voice/channel.go": "Add ChannelState struct + Join/Leave methods; wire into existing Room registry.",
+    "backend/internal/voice/channel_test.go": "Table-driven tests for Join with already-joined user; Leave for non-member; concurrent Join/Leave."
+  },
+  "tests": ["TestChannelJoin_AlreadyMember", "TestChannelLeave_NotMember", "TestChannelConcurrentJoinLeave"],
+  "kill_switch": "if go build fails after 2 edits, stop and report",
+  "estimated_diff_lines": 180,
+  "risk_flags": ["none"]
+}
+```
+
+## Hard rules
+  - ``files_touched`` length > 5 → you MUST split the feature; return a
+    ``split_proposal`` field instead with 2-4 child feature descriptions.
+  - ``estimated_diff_lines`` > 400 → same: split, don't proceed.
+  - Every feature must have at least one test file in ``files_touched``.
+  - Anything touching E2EE/auth/crypto/migrations → add
+    ``"security_review_required": true`` to the JSON.
+  - No prose outside the JSON block. The orchestrator parses exactly one
+    ```json ... ``` code fence.
 """
 
 
@@ -154,15 +209,19 @@ unless the implementation is complete.
 
 ## Phase workflow
 
-**Phase 0 — Outline (≤60s)**
+**Phase 0 — Read the plan you were given**
 
-Before ANY tool call, state your plan in 3 bullets (the files you expect to
-create/edit, the test you'll add, and how you'll know you're done). This is
-literal chain-of-thought — research shows it measurably improves tool-call
-correctness vs. jumping straight into reads. Keep it to 3 bullets max, do
-not write code in the outline.
+The orchestrator already ran the planner subagent. The delegation message
+contains a JSON plan with ``files_touched``, ``sketch``, ``tests``,
+``kill_switch``, and ``estimated_diff_lines``. DO NOT re-plan. DO NOT call
+``glob`` or ``read_file`` on files outside ``files_touched`` unless you
+actually need to (existing imports, neighbor file conventions). Re-planning
+burns Kimi quota — the planner already did that cheaply on MiniMax.
 
-**Phase 1 — Orient (read-heavy, ≤8 reads)**
+If the plan looks wrong, report ``BLOCKED: plan mismatch — <reason>``
+instead of improvising. The orchestrator will re-plan.
+
+**Phase 1 — Orient (read-heavy, ≤4 reads — plan already did the heavy work)**
   - ``ls`` the worktree root.
   - ``glob`` for files in the domain you're about to touch.
   - ``read_file`` 2–4 representative files to lock down conventions. Stop at 8.

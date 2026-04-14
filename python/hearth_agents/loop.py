@@ -101,6 +101,11 @@ def circuit_state() -> dict:
 # separately is what stops the ping-pong: when both hit 429 at once, workers
 # only sleep if BOTH are cooled down. If only one is cooled, we route through
 # the other instead of burning the cooldown idle.
+# Minimum cooldown we'll ever apply after a 429. Providers often advertise
+# Retry-After of 60s for 4h-window limits, but the deeper weekly/monthly cap
+# is the real limiter — hammering every minute just spams alerts and burns
+# tiny quota bursts. 15 min of backoff is the effective floor.
+_RATE_LIMIT_MIN_BACKOFF_SEC = 15 * 60
 _RATE_LIMIT_BACKOFF_SEC = 15 * 60  # default when no Retry-After header is given
 _RATE_LIMIT_MAX_BACKOFF_SEC = 4 * 60 * 60  # safety cap; never sleep longer than this
 _primary_cooldown_until: float = 0.0
@@ -140,7 +145,7 @@ def _retry_after_seconds(e: BaseException) -> float:
             raw = headers.get(key) if hasattr(headers, "get") else None
             if raw:
                 try:
-                    return min(max(float(raw), 60.0), _RATE_LIMIT_MAX_BACKOFF_SEC)
+                    return min(max(float(raw), _RATE_LIMIT_MIN_BACKOFF_SEC), _RATE_LIMIT_MAX_BACKOFF_SEC)
                 except (TypeError, ValueError):
                     pass
     # Some providers embed the reset time in the body — best effort string parse.
@@ -148,8 +153,16 @@ def _retry_after_seconds(e: BaseException) -> float:
     import re
     m = re.search(r"retry[- ]after[: ]+(\d+)", msg, re.IGNORECASE)
     if m:
-        return min(max(float(m.group(1)), 60.0), _RATE_LIMIT_MAX_BACKOFF_SEC)
+        return min(max(float(m.group(1)), _RATE_LIMIT_MIN_BACKOFF_SEC), _RATE_LIMIT_MAX_BACKOFF_SEC)
     return float(_RATE_LIMIT_BACKOFF_SEC)
+
+
+# Per-provider timestamp of last Telegram alert about rate-limiting. Coalesces
+# repeat alerts during a sustained outage: even if the cooldown keeps expiring
+# and re-opening (each technically a "leading edge"), we only ping Telegram
+# once per hour per provider.
+_RATE_LIMIT_ALERT_COALESCE_SEC = 60 * 60
+_last_rate_limit_alert: dict[str, float] = {}
 
 # Atomic claim lock: with multiple workers we must never let two workers grab
 # the same pending feature. Also used to enforce a single-self-improvement rule
@@ -407,7 +420,10 @@ async def run_once(
                 was_closed=was_closed,
                 error=str(e)[:200],
             )
-            if was_closed:
+            import time as _t
+            last_alert = _last_rate_limit_alert.get(provider, 0.0)
+            if was_closed and (_t.time() - last_alert) > _RATE_LIMIT_ALERT_COALESCE_SEC:
+                _last_rate_limit_alert[provider] = _t.time()
                 await notifier.send(
                     f"🛑 {provider} rate-limited — cooling {int(backoff) // 60}m, "
                     "routing through the other provider"
