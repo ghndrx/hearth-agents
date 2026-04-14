@@ -24,25 +24,59 @@ from .verify import verify_changes
 # and not drown structlog in interleaved events.
 LOOP_INTERVAL_SEC = 30
 
-# Shared across workers so all of them pause together when Kimi rate-limits.
-# One worker hitting 429 almost certainly means the others will too — no point
-# spinning them.
-_RATE_LIMIT_BACKOFF_SEC = 15 * 60
-_rate_limit_until: float = 0.0
+# Per-provider cooldowns. Tracking primary (Kimi) and fallback (MiniMax)
+# separately is what stops the ping-pong: when both hit 429 at once, workers
+# only sleep if BOTH are cooled down. If only one is cooled, we route through
+# the other instead of burning the cooldown idle.
+_RATE_LIMIT_BACKOFF_SEC = 15 * 60  # default when no Retry-After header is given
+_RATE_LIMIT_MAX_BACKOFF_SEC = 4 * 60 * 60  # safety cap; never sleep longer than this
+_primary_cooldown_until: float = 0.0
+_fallback_cooldown_until: float = 0.0
 
 
 def _is_rate_limit_error(e: BaseException) -> bool:
-    """Heuristic match for Kimi/MiniMax/OpenAI rate-limit errors.
+    """Detect Kimi/MiniMax/OpenAI rate-limit errors.
 
-    We can't rely on exception type alone because LangChain wraps provider
-    errors inconsistently. The 429 status code and the ``rate_limit_reached``
-    substring are stable across wrappers.
+    Prefers the typed ``openai.RateLimitError`` (sturdier across SDK versions)
+    and falls back to substring + status-code heuristics for cases where
+    LangChain has rewrapped the original exception.
     """
-    msg = str(e).lower()
-    if "rate_limit_reached" in msg or "rate limit" in msg:
-        return True
+    try:
+        from openai import RateLimitError
+        if isinstance(e, RateLimitError):
+            return True
+    except ImportError:
+        pass
     code = getattr(e, "status_code", None) or getattr(e, "code", None)
-    return code == 429
+    if code == 429:
+        return True
+    msg = str(e).lower()
+    return "rate_limit_reached" in msg or "rate limit" in msg
+
+
+def _retry_after_seconds(e: BaseException) -> float:
+    """Pull a backoff duration from the rate-limit error if the provider
+    included one. Falls back to ``_RATE_LIMIT_BACKOFF_SEC`` when nothing
+    parseable is found. Capped to avoid bad headers stranding workers for days.
+    """
+    # openai SDK exposes the raw response on the exception in some versions
+    response = getattr(e, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", None) or {}
+        for key in ("retry-after", "Retry-After", "x-ratelimit-reset"):
+            raw = headers.get(key) if hasattr(headers, "get") else None
+            if raw:
+                try:
+                    return min(max(float(raw), 60.0), _RATE_LIMIT_MAX_BACKOFF_SEC)
+                except (TypeError, ValueError):
+                    pass
+    # Some providers embed the reset time in the body — best effort string parse.
+    msg = str(e)
+    import re
+    m = re.search(r"retry[- ]after[: ]+(\d+)", msg, re.IGNORECASE)
+    if m:
+        return min(max(float(m.group(1)), 60.0), _RATE_LIMIT_MAX_BACKOFF_SEC)
+    return float(_RATE_LIMIT_BACKOFF_SEC)
 
 # Atomic claim lock: with multiple workers we must never let two workers grab
 # the same pending feature. Also used to enforce a single-self-improvement rule
@@ -153,8 +187,19 @@ async def _claim_next(backlog: Backlog) -> Feature | None:
         return feature
 
 
-async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: int = 0) -> bool:
-    """Process one feature. Returns True if work was done, False if idle."""
+async def run_once(
+    agent: Any,
+    backlog: Backlog,
+    notifier: Notifier,
+    worker_id: int = 0,
+    using_fallback: bool = False,
+) -> bool:
+    """Process one feature. Returns True if work was done, False if idle.
+
+    ``using_fallback`` tells the rate-limit handler which provider's cooldown
+    to set if a 429 fires — without it we couldn't tell whether the failure
+    came from primary (Kimi) or fallback (MiniMax) and we'd ping-pong.
+    """
     feature = await _claim_next(backlog)
     if feature is None:
         log.debug("loop_idle", reason="no_pending_features")
@@ -224,21 +269,28 @@ async def run_once(agent: Any, backlog: Backlog, notifier: Notifier, worker_id: 
         )
     except Exception as e:
         if _is_rate_limit_error(e):
-            # Return the feature to pending (another worker, or this one after
-            # the cooldown, will retry) and set a shared cooldown so no worker
-            # hammers the API until the window refreshes.
-            global _rate_limit_until
-            _rate_limit_until = asyncio.get_event_loop().time() + _RATE_LIMIT_BACKOFF_SEC
+            # Set the cooldown for whichever provider actually 429'd, not both.
+            # That's what lets workers route through the *other* provider while
+            # one is sleeping, instead of ping-ponging into both cooldowns.
+            global _primary_cooldown_until, _fallback_cooldown_until
+            backoff = _retry_after_seconds(e)
+            cooldown_until = asyncio.get_event_loop().time() + backoff
+            provider = "fallback (MiniMax)" if using_fallback else "primary (Kimi)"
+            if using_fallback:
+                _fallback_cooldown_until = cooldown_until
+            else:
+                _primary_cooldown_until = cooldown_until
             backlog.set_status(feature.id, "pending")
             log.warning(
                 "rate_limited",
                 id=feature.id,
-                backoff_sec=_RATE_LIMIT_BACKOFF_SEC,
+                provider=provider,
+                backoff_sec=int(backoff),
                 error=str(e)[:200],
             )
             await notifier.send(
-                f"🛑 [w{worker_id}] rate-limited on {feature.id} — all workers "
-                f"pausing {_RATE_LIMIT_BACKOFF_SEC // 60}m, then retrying"
+                f"🛑 [w{worker_id}] {provider} rate-limited on {feature.id} — "
+                f"cooling that provider for {int(backoff) // 60}m, switching to the other"
             )
         else:
             log.exception("feature_failed", id=feature.id, error=str(e))
@@ -264,25 +316,48 @@ async def _worker(
     notifier: Notifier,
     fallback_agent: Any | None = None,
 ) -> None:
-    """One feature-processing worker. Multiple workers share one backlog + agent.
+    """One feature-processing worker.
 
-    During a Kimi rate-limit cooldown, falls back to ``fallback_agent`` (MiniMax)
-    instead of sleeping — different provider, different quota bucket, work keeps
-    flowing. If no fallback is configured, sleeps as before.
+    Provider routing per iteration:
+      - Primary cooled, fallback hot      -> use fallback
+      - Fallback cooled, primary hot      -> use primary
+      - Both hot (or no fallback)         -> use primary
+      - Both cooled (or no fallback)      -> sleep until the soonest expiry
     """
     while True:
         now = asyncio.get_event_loop().time()
-        cooldown_active = _rate_limit_until > now
-        if cooldown_active and fallback_agent is None:
-            # No fallback available — old behavior: sleep until cooldown expires.
-            wait = _rate_limit_until - now
-            log.info("rate_limit_sleeping", worker=worker_id, sleep_sec=int(wait))
+        primary_cool = _primary_cooldown_until > now
+        fallback_cool = (
+            fallback_agent is not None and _fallback_cooldown_until > now
+        )
+
+        if primary_cool and (fallback_agent is None or fallback_cool):
+            # Nothing to use — sleep until whichever cooldown ends first.
+            soonest = _primary_cooldown_until
+            if fallback_agent is not None:
+                soonest = min(soonest, _fallback_cooldown_until)
+            wait = max(1.0, soonest - now)
+            log.info(
+                "rate_limit_sleeping",
+                worker=worker_id,
+                sleep_sec=int(wait),
+                primary_cool=primary_cool,
+                fallback_cool=fallback_cool,
+            )
             await asyncio.sleep(wait)
             continue
-        active_agent = fallback_agent if cooldown_active else agent
-        if cooldown_active:
-            log.info("using_fallback_agent", worker=worker_id, until=int(_rate_limit_until - now))
-        did_work = await run_once(active_agent, backlog, notifier, worker_id=worker_id)
+
+        use_fallback = primary_cool and fallback_agent is not None and not fallback_cool
+        active_agent = fallback_agent if use_fallback else agent
+        if use_fallback:
+            log.info(
+                "using_fallback_agent",
+                worker=worker_id,
+                primary_cooldown_remaining=int(_primary_cooldown_until - now),
+            )
+        did_work = await run_once(
+            active_agent, backlog, notifier, worker_id=worker_id, using_fallback=use_fallback
+        )
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
 
