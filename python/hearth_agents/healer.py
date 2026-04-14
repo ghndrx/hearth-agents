@@ -98,17 +98,25 @@ async def run_healer(backlog: Backlog) -> None:
 
             if healed:
                 backlog.save()
-                await notifier.send(f"🩹 healer reset {len(healed)} blocked: {', '.join(healed)[:300]}")
+                # Coalesce healer batch notifications — with 150+ blocked
+                # features the loop was firing this every 5 min. An hourly
+                # summary is enough signal; raw log keeps per-feature detail.
+                await notifier.send_coalesced(
+                    "healer_batch",
+                    f"🩹 healer reset {len(healed)} blocked this cycle "
+                    "(further reset batches suppressed for 1h)",
+                )
             if escalated:
                 # Bump to prevent re-sending the same escalation every cycle.
                 for f in backlog.features:
                     if f.id in escalated:
                         f.heal_attempts += 1  # >MAX_ATTEMPTS now, silences future escalations
                 backlog.save()
-                await notifier.send(
-                    f"🚨 healer giving up on {len(escalated)} feature(s) after "
-                    f"{HEAL_MAX_ATTEMPTS} attempts — human review needed: "
-                    f"{', '.join(escalated)[:300]}"
+                # Escalations ARE user-actionable — keep the raw send but still
+                # coalesce so 50 escalations don't become 50 pings.
+                await notifier.send_coalesced(
+                    "healer_escalation",
+                    f"🚨 healer giving up on {len(escalated)} feature(s) — human review needed",
                 )
 
             await asyncio.sleep(HEAL_INTERVAL_SEC)

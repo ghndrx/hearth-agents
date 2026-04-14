@@ -73,9 +73,10 @@ def _check_circuit_breaker() -> bool:
         try:
             from .notify import Notifier as _N
             _n = _N()
-            asyncio.create_task(_n.send(
+            asyncio.create_task(_n.send_coalesced(
+                "circuit_breaker",
                 f"🚨 circuit breaker OPEN — block rate {rate:.0%} over "
-                f"{len(_verdict_log)} features, pausing {CIRCUIT_COOLDOWN_SEC // 60}m"
+                f"{len(_verdict_log)} features, pausing {CIRCUIT_COOLDOWN_SEC // 60}m",
             ))
         except Exception:  # noqa: BLE001
             pass
@@ -157,12 +158,9 @@ def _retry_after_seconds(e: BaseException) -> float:
     return float(_RATE_LIMIT_BACKOFF_SEC)
 
 
-# Per-provider timestamp of last Telegram alert about rate-limiting. Coalesces
-# repeat alerts during a sustained outage: even if the cooldown keeps expiring
-# and re-opening (each technically a "leading edge"), we only ping Telegram
-# once per hour per provider.
-_RATE_LIMIT_ALERT_COALESCE_SEC = 60 * 60
-_last_rate_limit_alert: dict[str, float] = {}
+# Per-provider rate-limit alert coalescing is now handled by
+# Notifier.send_coalesced(key=f"rate_limit:{provider}"). The ad-hoc state
+# that used to live here is redundant.
 
 # Atomic claim lock: with multiple workers we must never let two workers grab
 # the same pending feature. Also used to enforce a single-self-improvement rule
@@ -386,8 +384,9 @@ async def run_once(
     except asyncio.TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
         backlog.set_status(feature.id, "blocked")
-        await notifier.send(
-            f"⏱️ [w{worker_id}] timeout {feature.id} after {settings.per_feature_timeout_sec}s"
+        await notifier.send_coalesced(
+            "timeout",
+            f"⏱️ feature timeout after {settings.per_feature_timeout_sec}s — further timeouts suppressed for 1h",
         )
     except Exception as e:
         if _is_rate_limit_error(e):
@@ -420,18 +419,20 @@ async def run_once(
                 was_closed=was_closed,
                 error=str(e)[:200],
             )
-            import time as _t
-            last_alert = _last_rate_limit_alert.get(provider, 0.0)
-            if was_closed and (_t.time() - last_alert) > _RATE_LIMIT_ALERT_COALESCE_SEC:
-                _last_rate_limit_alert[provider] = _t.time()
-                await notifier.send(
-                    f"🛑 {provider} rate-limited — cooling {int(backoff) // 60}m, "
-                    "routing through the other provider"
-                )
+            # Single coalesced alert per provider per hour — kept sending every
+            # 60s during sustained outages because Kimi's Retry-After is 60s
+            # even when the weekly quota is out for days.
+            await notifier.send_coalesced(
+                f"rate_limit:{provider}",
+                f"🛑 {provider} rate-limited — cooling {int(backoff) // 60}m, "
+                "routing through the other provider (alerts suppressed 1h)",
+            )
         else:
             log.exception("feature_failed", id=feature.id, error=str(e))
             backlog.set_status(feature.id, "blocked")
-            await notifier.send(f"💥 [w{worker_id}] failed {feature.id}: {e}")
+            # Generic failures are logged but NOT sent to Telegram anymore —
+            # they were the biggest residual source of spam. The healer's
+            # batched reset alert covers the aggregate signal.
     finally:
         if feature.self_improvement:
             global _self_improv_active
