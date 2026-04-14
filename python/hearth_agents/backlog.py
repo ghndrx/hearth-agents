@@ -34,6 +34,11 @@ class Feature:
     # How many times the healer has reset this feature from blocked→pending.
     # Capped so a permanently-broken feature doesn't ping-pong forever.
     heal_attempts: int = 0
+    # Set by the healer when it resets a blocked feature. Carries a targeted
+    # hint into the next attempt's prompt so the agent doesn't repeat the same
+    # failure mode (e.g. opening a worktree and committing nothing). Cleared
+    # by the loop on successful completion.
+    heal_hint: str = ""
 
 
 # Initial backlog. The idea engine appends to this over time.

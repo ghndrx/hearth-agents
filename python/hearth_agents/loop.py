@@ -136,8 +136,14 @@ Repo paths:
 {repo_paths}
 {conventions_block}"""
 
-    return f"""Implement feature ``{feature.id}``.
+    # heal_hint comes from healer.py — a targeted instruction reflecting the
+    # specific verify failure last time. Pasting it at the TOP makes it the
+    # first thing the orchestrator reads, so the next attempt can't blindly
+    # repeat the same failure mode (the 7/9 'no commits' cluster we saw).
+    heal_block = f"\n\n{feature.heal_hint}\n" if feature.heal_hint else ""
 
+    return f"""Implement feature ``{feature.id}``.
+{heal_block}
 Name: {feature.name}
 Priority: {feature.priority}
 Discord parity: {feature.discord_parity}
@@ -251,6 +257,11 @@ async def run_once(
 
         backlog.set_status(feature.id, verdict)
         if verdict == "done":
+            # Clear the heal hint so future re-runs (idea engine duplicates,
+            # manual re-queues) start from a clean prompt instead of carrying
+            # stale "PRIOR FAILURE" advice that no longer applies.
+            feature.heal_hint = ""
+            backlog.save()
             record_done(
                 feature.id,
                 feature.name,

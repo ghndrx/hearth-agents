@@ -30,15 +30,58 @@ def _run(cmd: list[str], cwd: str | None = None, timeout: int = 60) -> tuple[int
         return 127, f"Command not found: {cmd[0]}"
 
 
+_DIFF_SOFT_WARN = 200
+_DIFF_HARD_WARN = 400
+
+
 @tool
 def git_status(repo_path: str) -> str:
-    """Return ``git status --short`` output for a repository.
+    """Return ``git status --short`` output for a repository, plus a
+    diff-size summary against the base branch when the worktree is on a
+    feature branch. The summary surfaces mid-stream so the agent can split
+    or wrap up BEFORE hitting the 600-line verifier cap (which has stranded
+    multiple features at >2000 lines).
 
     Args:
         repo_path: Absolute path to the git repo or worktree.
     """
     code, out = _run(["git", "status", "--short"], cwd=repo_path, timeout=10)
-    return out or "(clean)" if code == 0 else f"error: {out}"
+    if code != 0:
+        return f"error: {out}"
+    status = out or "(clean)"
+
+    # Determine current branch + base. develop for hearth, main everywhere else.
+    bcode, branch = _run(
+        ["git", "symbolic-ref", "--short", "HEAD"], cwd=repo_path, timeout=5
+    )
+    if bcode != 0 or not branch.strip().startswith("feat/"):
+        return status
+    base = "develop" if "/hearth/" in repo_path or repo_path.endswith("/hearth") else "main"
+    dcode, dout = _run(
+        ["git", "diff", "--shortstat", f"{base}...HEAD"], cwd=repo_path, timeout=10
+    )
+    if dcode != 0 or not dout.strip():
+        return status
+    # shortstat format: " 3 files changed, 47 insertions(+), 12 deletions(-)"
+    import re as _re
+    ins = sum(int(m) for m in _re.findall(r"(\d+) insertion", dout))
+    dele = sum(int(m) for m in _re.findall(r"(\d+) deletion", dout))
+    total = ins + dele
+    note = ""
+    if total >= _DIFF_HARD_WARN:
+        note = (
+            f"\n⚠️  DIFF SIZE WARNING: {total} lines vs {base} (cap is 600). "
+            "WRAP UP NOW — make any final edits, run tests, commit. Do not "
+            "add more files. If the feature genuinely needs more, stop and "
+            "report 'BLOCKED: needs decomposition'."
+        )
+    elif total >= _DIFF_SOFT_WARN:
+        note = (
+            f"\n📏 diff size: {total} lines vs {base} (soft warn at "
+            f"{_DIFF_SOFT_WARN}, hard at {_DIFF_HARD_WARN}, cap at 600). "
+            "Stay focused on the feature scope; defer secondary concerns."
+        )
+    return f"{status}\n\ndiff vs {base}: {dout.strip()}{note}"
 
 
 @tool

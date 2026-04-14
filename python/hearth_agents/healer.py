@@ -18,10 +18,48 @@ import asyncio
 from .backlog import Backlog
 from .logger import log
 from .notify import Notifier
+from .verify import verify_changes
 
 HEAL_INTERVAL_SEC = 300  # scan every 5 minutes
 HEAL_MAX_ATTEMPTS = 3    # after this many resets we stop and escalate
 HEAL_COOLDOWN_SEC = 600  # skip features blocked less than this long — give in-run fixup a chance
+
+
+def _hint_for_reason(reason: str) -> str:
+    """Translate a verify_changes reason into a targeted instruction the
+    next-attempt prompt can paste in. Empty string when we have no specific
+    advice (the agent then runs with the normal prompt).
+    """
+    r = reason.lower()
+    if "no commits" in r:
+        return (
+            "PRIOR FAILURE: you opened a worktree last time and never committed "
+            "anything. Do NOT enter another exploratory read-only spiral. After "
+            "at most 6 reads, start writing with edit_file/write_file. End the "
+            "session with either (a) a real git_commit on the feature branch or "
+            "(b) a single message saying 'BLOCKED: <one concrete blocker>' and "
+            "no commit. Both are acceptable; abandoning silently is not."
+        )
+    if "diff too large" in r:
+        return (
+            "PRIOR FAILURE: your diff exceeded the 600-line cap. This time, "
+            "implement only the minimum viable slice that satisfies the feature "
+            "name; defer secondary concerns to follow-up features. Target "
+            "<300 lines of diff. If the feature genuinely cannot be sliced, "
+            "report 'BLOCKED: needs decomposition' rather than over-shipping."
+        )
+    if "tests failed" in r:
+        return (
+            "PRIOR FAILURE: the test suite failed last attempt. Read the failing "
+            "test output FIRST (run_command the test command, parse the failure), "
+            "fix only what's broken, re-run the same test, then run the full suite."
+        )
+    if "never pushed" in r:
+        return (
+            "PRIOR FAILURE: you committed locally but never pushed. End with a "
+            "git push -u origin HEAD and verify with git ls-remote --heads origin."
+        )
+    return ""
 
 
 async def run_healer(backlog: Backlog) -> None:
@@ -39,12 +77,19 @@ async def run_healer(backlog: Backlog) -> None:
                     # Only escalate once — track by marking a dummy status bump.
                     # For now we just log; human intervention is the ask.
                     continue
-                # Reset to pending and bump counter. Persist via save() since
-                # we're mutating the in-memory object directly.
+                # Re-verify to learn WHY this feature is blocked, so the next
+                # attempt's prompt can carry a targeted hint instead of just
+                # "try again". Without this the agent typically repeats the
+                # exact failure mode (the 7/9 'no commits' cluster we saw).
+                try:
+                    _, reason = verify_changes(f)
+                except Exception as e:  # noqa: BLE001
+                    reason = f"healer could not re-verify: {e}"
+                f.heal_hint = _hint_for_reason(reason)
                 f.heal_attempts += 1
                 f.status = "pending"
                 healed.append(f"{f.id} (attempt {f.heal_attempts}/{HEAL_MAX_ATTEMPTS})")
-                log.info("healer_reset", id=f.id, attempt=f.heal_attempts)
+                log.info("healer_reset", id=f.id, attempt=f.heal_attempts, reason=reason[:120])
 
             # Identify features that just hit the ceiling for escalation.
             for f in backlog.features:
