@@ -382,9 +382,18 @@ async def run_once(
             # That's what lets workers route through the *other* provider while
             # one is sleeping, instead of ping-ponging into both cooldowns.
             global _primary_cooldown_until, _fallback_cooldown_until
+            now = asyncio.get_event_loop().time()
             backoff = _retry_after_seconds(e)
-            cooldown_until = asyncio.get_event_loop().time() + backoff
+            cooldown_until = now + backoff
             provider = "fallback (MiniMax)" if using_fallback else "primary (Kimi)"
+            # Only ping Telegram on the LEADING edge — when this 429 is the
+            # first one to open the cooldown, not when another worker is just
+            # racing into the same already-open window. With 2 workers this
+            # doubled every alert; during a saturated window it fired every
+            # ~30s until the quota refreshed.
+            was_closed = (
+                _fallback_cooldown_until if using_fallback else _primary_cooldown_until
+            ) <= now
             if using_fallback:
                 _fallback_cooldown_until = cooldown_until
             else:
@@ -395,12 +404,14 @@ async def run_once(
                 id=feature.id,
                 provider=provider,
                 backoff_sec=int(backoff),
+                was_closed=was_closed,
                 error=str(e)[:200],
             )
-            await notifier.send(
-                f"🛑 [w{worker_id}] {provider} rate-limited on {feature.id} — "
-                f"cooling that provider for {int(backoff) // 60}m, switching to the other"
-            )
+            if was_closed:
+                await notifier.send(
+                    f"🛑 {provider} rate-limited — cooling {int(backoff) // 60}m, "
+                    "routing through the other provider"
+                )
         else:
             log.exception("feature_failed", id=feature.id, error=str(e))
             backlog.set_status(feature.id, "blocked")
