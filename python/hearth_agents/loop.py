@@ -396,6 +396,7 @@ async def run_once(
     notifier: Notifier,
     worker_id: int = 0,
     using_fallback: bool = False,
+    alt_agent: Any | None = None,
 ) -> bool:
     """Process one feature. Returns True if work was done, False if idle.
 
@@ -415,12 +416,14 @@ async def run_once(
     # and the log still carries full start/stop events for debugging.
 
     # Bounded self-correction: if the verifier blocks on a fixable reason
-    # (failing tests, oversized diff), give the agent up to MAX_FIXUPS chances
-    # to fix it. Abort immediately on loop signature (same reason twice) —
-    # research shows multi-turn reflection can hurt accuracy by ~40% if
-    # unbounded, so keep this tight.
-    MAX_FIXUPS = 2
-    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high")
+    # Bounded self-correction: allow MAX_FIXUPS retries for recoverable
+    # failures. Raised from 2 → 4 because the triage showed 6/12 blocks were
+    # "tests failed" that ran out of attempts — Kimi has plenty of quota left,
+    # and failing tests are exactly the kind of thing an extra 2 retries
+    # catches. Still aborts on loop-signature deadlock (same reason twice)
+    # so we don't infinitely spin.
+    MAX_FIXUPS = 4
+    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount")
 
     try:
         attempt = 0
@@ -432,8 +435,24 @@ async def run_once(
 
         while attempt <= MAX_FIXUPS:
             prompt = _feature_prompt(feature, fixup=fixup)
+            # Cross-model retry: alternate between agent and alt_agent on each
+            # attempt. Kimi and MiniMax have different failure modes — if one
+            # can't close a feature after trying, the other often can. On
+            # attempt 0 we use the caller's choice (set by ping-pong); on
+            # each retry we flip. Doubles the effective "try again" budget
+            # without doubling any one provider's quota burn.
+            active = agent if (attempt % 2 == 0 or alt_agent is None) else alt_agent
+            active_provider = (
+                "fallback" if (active is alt_agent) ^ (not using_fallback) else "primary"
+            )
+            log.info(
+                "iterate_attempt",
+                feature=feature.id,
+                attempt=attempt,
+                active_provider=active_provider,
+            )
             result = await asyncio.wait_for(
-                agent.ainvoke({"messages": [{"role": "user", "content": prompt}]}),
+                active.ainvoke({"messages": [{"role": "user", "content": prompt}]}),
                 timeout=settings.per_feature_timeout_sec,
             )
             last = result["messages"][-1].content if result.get("messages") else ""
@@ -637,8 +656,18 @@ async def _worker(
             provider="fallback" if use_fallback else "primary",
             reason=reason,
         )
+        # For cross-model retry: pass the OTHER agent as alt_agent. If the
+        # active agent is primary, alt is fallback, and vice-versa. When
+        # there's no fallback configured, alt_agent is None and run_once
+        # stays on the same model throughout its retries (old behavior).
+        alt = fallback_agent if not use_fallback else agent
         did_work = await run_once(
-            active_agent, backlog, notifier, worker_id=worker_id, using_fallback=use_fallback
+            active_agent,
+            backlog,
+            notifier,
+            worker_id=worker_id,
+            using_fallback=use_fallback,
+            alt_agent=alt,
         )
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
