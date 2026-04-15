@@ -446,6 +446,9 @@ async def run_once(
 
 
 
+_pingpong_counter: int = 0
+
+
 async def _worker(
     worker_id: int,
     backlog: Backlog,
@@ -455,11 +458,15 @@ async def _worker(
 ) -> None:
     """One feature-processing worker.
 
-    Provider routing per iteration:
-      - Primary cooled, fallback hot      -> use fallback
-      - Fallback cooled, primary hot      -> use primary
-      - Both hot (or no fallback)         -> use primary
-      - Both cooled (or no fallback)      -> sleep until the soonest expiry
+    Provider routing per iteration (both-healthy mode now ping-pongs):
+      - Both healthy + fallback configured -> alternate per feature.
+        Kimi and MiniMax share load 50/50 via a shared ``_pingpong_counter``
+        so across multiple workers the ratio evens out. MiniMax Max has
+        15k req / 5h, plenty of headroom to carry half the work.
+      - Primary cooled, fallback hot       -> use fallback
+      - Fallback cooled, primary hot       -> use primary
+      - No fallback configured             -> use primary
+      - Both cooled                        -> sleep until the soonest expiry
     """
     while True:
         # Circuit breaker comes FIRST: if quality has collapsed we want to
@@ -494,14 +501,33 @@ async def _worker(
             await asyncio.sleep(wait)
             continue
 
-        use_fallback = primary_cool and fallback_agent is not None and not fallback_cool
+        # Provider selection:
+        #  1. If one is cooled, use the other.
+        #  2. If both are healthy and fallback is configured, ping-pong on a
+        #     shared counter. Spreads load 50/50 across providers instead of
+        #     dogpiling whichever is nominally "primary".
+        if primary_cool and fallback_agent is not None and not fallback_cool:
+            use_fallback = True
+            reason = "primary_cooled"
+        elif fallback_cool:
+            use_fallback = False
+            reason = "fallback_cooled"
+        elif fallback_agent is not None:
+            global _pingpong_counter
+            use_fallback = (_pingpong_counter % 2) == 1
+            _pingpong_counter += 1
+            reason = "pingpong"
+        else:
+            use_fallback = False
+            reason = "no_fallback_configured"
+
         active_agent = fallback_agent if use_fallback else agent
-        if use_fallback:
-            log.info(
-                "using_fallback_agent",
-                worker=worker_id,
-                primary_cooldown_remaining=int(_primary_cooldown_until - now),
-            )
+        log.info(
+            "worker_routing",
+            worker=worker_id,
+            provider="fallback" if use_fallback else "primary",
+            reason=reason,
+        )
         did_work = await run_once(
             active_agent, backlog, notifier, worker_id=worker_id, using_fallback=use_fallback
         )
