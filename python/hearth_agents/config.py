@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # Wall-clock timeout for a single feature's agent.ainvoke call. Stopgap for
     # ``self-hard-kill-switch`` — prevents runaway features from chewing quota.
     per_feature_timeout_sec: int = 1800
+    # When both providers are healthy, what fraction of features should be
+    # routed to the fallback (MiniMax)? 0.5 = even split, 1.0 = always MiniMax
+    # when healthy, 0.0 = always Kimi. Raise when MiniMax has more headroom
+    # than Kimi (typical: Kimi Allegretto weekly is tighter than MiniMax Max
+    # 5h window). Clamped to [0.0, 1.0] before use.
+    minimax_bias: float = 0.5
 
     # Server
     server_host: str = "0.0.0.0"

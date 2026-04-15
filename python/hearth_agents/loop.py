@@ -545,10 +545,19 @@ async def _worker(
             use_fallback = False
             reason = "fallback_cooled"
         elif fallback_agent is not None:
+            # Weighted ping-pong using ``settings.minimax_bias`` (0.0-1.0).
+            # 0.5 = even split; higher = more toward fallback (MiniMax). We use
+            # a running fractional accumulator rather than random() so the
+            # distribution is deterministic and exact over any window — e.g.
+            # bias=0.75 produces exactly 3 fallback picks for every 1 primary.
             global _pingpong_counter
-            use_fallback = (_pingpong_counter % 2) == 1
+            bias = max(0.0, min(1.0, settings.minimax_bias))
+            # Accumulator approach: each tick adds bias; when the integer
+            # part increments, route to fallback. Equivalent to Bresenham.
+            prev = _pingpong_counter
             _pingpong_counter += 1
-            reason = "pingpong"
+            use_fallback = int((_pingpong_counter) * bias) > int(prev * bias)
+            reason = f"pingpong(bias={bias:.2f})"
         else:
             use_fallback = False
             reason = "no_fallback_configured"
