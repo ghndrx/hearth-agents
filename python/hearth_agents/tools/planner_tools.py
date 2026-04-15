@@ -1,15 +1,15 @@
 """Tools for recording planner output so the verifier can cross-check it later.
 
-Currently just one tool: ``record_planner_estimate`` — called by the
-orchestrator after the planner subagent returns its JSON plan. Persists the
-estimated_diff_lines on the Feature so verify_changes can compare to the
-actual diff and catch planner undercount before it blows the 600-line cap
-(research job #3673).
+``record_planner_estimate`` persists the planner's estimated_diff_lines on
+the Feature so verify_changes can catch undercount (>1.5x) before it blows
+the 600-line diff cap (research job #3673).
 
-The tool writes directly to /data/backlog.json — that's the same path the
-Backlog class loads from, so any running Backlog instance will see the new
-value on its next save()/_load() cycle. Writes are best-effort; a failed
-write won't fail the feature, just loses the planner-cross-check for this run.
+Writes go through the in-process ``Backlog.update_planner_estimate`` rather
+than touching the JSON file directly. The earlier disk-only path raced the
+main Backlog's save(): the tool wrote 120, then a concurrent save() from
+set_status/healer wrote its stale est=0 over the top, silently discarding
+the value. Going through the shared in-memory instance keeps a single
+source of truth.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from ..backlog import get_default_backlog
 from ..config import settings
 from ..logger import log
 
@@ -45,6 +46,23 @@ def record_planner_estimate(feature_id: str, estimated_diff_lines: int) -> str:
     """
     if estimated_diff_lines <= 0:
         return f"error: estimated_diff_lines must be positive, got {estimated_diff_lines}"
+
+    backlog = get_default_backlog()
+    if backlog is not None:
+        # In-process path: mutate the live Backlog so concurrent save() calls
+        # from set_status/healer don't clobber our write.
+        if backlog.update_planner_estimate(feature_id, int(estimated_diff_lines)):
+            log.info(
+                "planner_estimate_recorded",
+                feature=feature_id,
+                estimate_lines=estimated_diff_lines,
+                via="in_memory",
+            )
+            return f"recorded estimate={estimated_diff_lines} for {feature_id}"
+        return f"error: feature {feature_id} not found in in-memory backlog"
+
+    # Fallback: no registered Backlog (e.g. running the tool in isolation for
+    # testing). Best-effort disk write. Live production never hits this.
     path = Path(settings.backlog_path)
     try:
         data = json.loads(path.read_text())
@@ -60,6 +78,7 @@ def record_planner_estimate(feature_id: str, estimated_diff_lines: int) -> str:
                 "planner_estimate_recorded",
                 feature=feature_id,
                 estimate_lines=estimated_diff_lines,
+                via="disk_fallback",
             )
-            return f"recorded estimate={estimated_diff_lines} for {feature_id}"
+            return f"recorded estimate={estimated_diff_lines} for {feature_id} (disk fallback)"
     return f"error: feature {feature_id} not found in backlog"

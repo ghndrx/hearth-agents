@@ -150,6 +150,25 @@ class Backlog:
         self._path = Path(persist_path) if persist_path else None
         if self._path and self._path.exists():
             self._load()
+        # Register as the default so tools running in the same process can
+        # mutate this Backlog in-memory instead of racing with the JSON file.
+        # Last-instance-wins on purpose — tests that build throwaway backlogs
+        # will take over the slot while they run. Restoring isn't necessary
+        # because production only ever constructs one Backlog.
+        global _default_backlog
+        _default_backlog = self
+
+    def update_planner_estimate(self, feature_id: str, estimate_lines: int) -> bool:
+        """Update a feature's planner estimate in-memory and persist. Returns
+        True on success, False if the feature wasn't found. Thread-safety
+        relies on asyncio's single-threaded execution — all callers run in
+        the same event loop."""
+        for f in self.features:
+            if f.id == feature_id:
+                f.planner_estimate_lines = max(0, int(estimate_lines))
+                self.save()
+                return True
+        return False
 
     def _load(self) -> None:
         assert self._path is not None
@@ -165,6 +184,20 @@ class Backlog:
         if self._path:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
+
+
+# Module-level registry of the "default" (main-process) Backlog instance. Set
+# by __init__ so tools (like ``record_planner_estimate``) can mutate the live
+# in-memory state directly instead of writing to disk and racing with the
+# in-memory instance's save(). This keeps a single source of truth.
+_default_backlog: "Backlog | None" = None
+
+
+def get_default_backlog() -> "Backlog | None":
+    """Return the Backlog instance registered by the first __init__ call, or
+    None if no Backlog has been instantiated yet. Tools should use this to
+    mutate live state rather than writing the JSON file directly."""
+    return _default_backlog
 
     def next_pending(self) -> Feature | None:
         """Self-improvement features always jump the queue ahead of product
