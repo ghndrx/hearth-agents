@@ -185,7 +185,7 @@ Immediately BEFORE returning your JSON, call the tool:
                             estimated_diff_lines=<your integer estimate>)
 
 The orchestrator's task message includes the feature id — extract it verbatim
-from something like ``Plan feature \`\`kbd-shortcut-hints\`\` targeting hearth``.
+from something like: Plan feature ``kbd-shortcut-hints`` targeting hearth.
 Do NOT skip this call. If you skip it, the verifier has no baseline to
 compare against and large-diff features silently blow the cap. The tool
 returns confirmation or an error; either way you proceed to emit the JSON.
