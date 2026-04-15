@@ -62,16 +62,22 @@ def maybe_split(backlog: Backlog, feature: Feature) -> bool:
         if backlog.add(child):
             children.append(child)
 
+    # Parent is replaced by its children — we REMOVE it from the backlog
+    # entirely rather than marking it ``done``. Previously the ghost parent
+    # counted as a success in /stats even when all its children were
+    # blocked, inflating the done-rate and hiding real failures.
+    try:
+        backlog.features.remove(feature)
+    except ValueError:
+        # Another concurrent actor already removed it — harmless.
+        pass
+    backlog.save()
+
     if not children:
-        # All child ids already existed → prior split attempt. Mark parent
-        # done to stop it being re-claimed; the existing children will run.
-        feature.status = "done"
-        backlog.save()
+        # All child IDs already existed → prior split attempt. Parent is gone,
+        # the existing children will run. No log — we've been here before.
         return True
 
-    # Parent is replaced by its children. Mark done so the claim loop skips it.
-    feature.status = "done"
-    backlog.save()
     log.info(
         "feature_split",
         parent=feature.id,
