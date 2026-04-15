@@ -314,7 +314,12 @@ async def run_idea_engine(backlog: Backlog) -> None:
         log.info("idea_engine_disabled", reason="no_minimax_key")
         return
     model = build_minimax()
-    reviewer = build_kimi() if settings.kimi_api_key else None
+    # Review is cheap classification (score 3 axes, JSON output) — use MiniMax
+    # not Kimi. Earlier we hardcoded Kimi for the reviewer, which meant the
+    # moment Kimi's weekly quota exhausted every idea got rejected by the
+    # fail-closed reviewer path and the backlog stopped growing. MiniMax has
+    # 15k req/5h and handles this task fine.
+    reviewer = build_minimax()
     notifier = Notifier()
     log.info(
         "idea_engine_started",
