@@ -25,6 +25,63 @@ from .verify import verify_changes
 LOOP_INTERVAL_SEC = 30
 
 
+def _rescue_uncommitted_worktrees(feature: Feature) -> None:
+    """If the agent edited files in a feature worktree but never committed
+    them, auto-commit now so the iterate loop has something real to verify.
+
+    Root cause being fixed: Kimi + DeepAgents reliably falls into
+    read-explore-abandon spirals on some features — it makes legitimate
+    edits via write_file/edit_file but exits the agent.ainvoke session
+    without ever calling git_commit. The verifier then sees "no commits"
+    and blocks, discarding real work. This helper claws those edits back
+    into a commit so they go through the normal test/review gates.
+
+    Best-effort: any failure (worktree missing, git errors) is logged and
+    swallowed. Never fails the surrounding iterate loop.
+    """
+    import subprocess
+    from pathlib import Path as _P
+    branch = f"feat/{feature.id}"
+    for repo_name in feature.repos:
+        repo_path = settings.repo_paths.get(repo_name)
+        if not repo_path:
+            continue
+        wt = _P(repo_path).parent / f"worktrees-{_P(repo_path).name}" / branch
+        if not wt.exists():
+            continue
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+            )
+            has_uncommitted = status.returncode == 0 and bool(status.stdout.strip())
+            if not has_uncommitted:
+                continue
+            # Stage + commit. Auto-push handled by our git_commit tool elsewhere,
+            # but here we're bypassing the tool (raw subprocess) to keep this
+            # path independent of DeepAgents. Push explicitly.
+            subprocess.run(["git", "add", "-A"], cwd=str(wt), timeout=15, check=False)
+            commit = subprocess.run(
+                ["git", "commit", "-m", f"wip({feature.id}): auto-commit of uncommitted dev work"],
+                cwd=str(wt), capture_output=True, text=True, timeout=15, check=False,
+            )
+            if commit.returncode != 0:
+                log.warning("rescue_commit_failed", feature=feature.id, err=commit.stderr[:200])
+                continue
+            push = subprocess.run(
+                ["git", "push", "-u", "origin", "HEAD"],
+                cwd=str(wt), capture_output=True, text=True, timeout=60, check=False,
+            )
+            log.info(
+                "rescue_committed",
+                feature=feature.id,
+                repo=repo_name,
+                push_ok=(push.returncode == 0),
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("rescue_failed", feature=feature.id, err=str(e)[:200])
+
+
 def _agent_self_reports_blocked(text: str) -> bool:
     """Detect when the orchestrator self-reports that the feature couldn't
     be completed. Research job #3670 flagged the previous substring match
@@ -92,10 +149,16 @@ def _check_circuit_breaker() -> bool:
     rate = blocked / len(_verdict_log)
     if rate >= CIRCUIT_BLOCK_THRESHOLD:
         globals()["_circuit_open_until"] = now + CIRCUIT_COOLDOWN_SEC
+        samples_at_trip = len(_verdict_log)
+        # Clear the verdict log when tripping — otherwise the stale
+        # all-blocked window persists past the cooldown and re-trips the
+        # breaker the instant a single new feature fails, trapping the
+        # loop in a "wake-up-reblock" cycle. Fresh cooldown = fresh data.
+        _verdict_log.clear()
         log.warning(
             "circuit_breaker_tripped",
             block_rate=round(rate, 2),
-            samples=len(_verdict_log),
+            samples_at_trip=samples_at_trip,
             cooldown_sec=CIRCUIT_COOLDOWN_SEC,
         )
         # Fire-and-forget Telegram alert — we're already in an async context
@@ -375,6 +438,11 @@ async def run_once(
             )
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
+            # Rescue stray diffs: if the agent wrote files in a worktree but
+            # never committed, auto-commit them now so the iterate loop has
+            # something to verify. Turns the dominant "no commits" failure
+            # mode into a recoverable "tests maybe fail" one.
+            _rescue_uncommitted_worktrees(feature)
             ok, reason = verify_changes(feature)
             verdict = claimed if (claimed == "blocked" or ok) else "blocked"
             if verdict == "done":
