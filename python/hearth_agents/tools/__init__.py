@@ -1,6 +1,7 @@
 """Custom tools the DeepAgent calls in addition to built-in filesystem/shell tools."""
 
 from .git_ops import git_branch_create, git_commit, git_status, git_worktree_add, git_worktree_remove
+from .planner_tools import record_planner_estimate
 from .repo_search import repo_reindex, repo_search
 from .serper import web_search
 from .shell import run_command
@@ -27,4 +28,5 @@ __all__ = [
     "git_branch_create",
     "git_worktree_add",
     "git_worktree_remove",
+    "record_planner_estimate",
 ]

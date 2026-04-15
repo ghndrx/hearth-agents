@@ -24,6 +24,38 @@ from .verify import verify_changes
 # and not drown structlog in interleaved events.
 LOOP_INTERVAL_SEC = 30
 
+
+def _agent_self_reports_blocked(text: str) -> bool:
+    """Detect when the orchestrator self-reports that the feature couldn't
+    be completed. Research job #3670 flagged the previous substring match
+    (``"blocked" in text.lower()[:200]``) as fragile — it false-negatives
+    when the agent's final message doesn't start with the word ``blocked``
+    but DOES contain a structured BLOCK verdict from the reviewer or
+    security subagents. This multi-signal check is more defensive.
+    """
+    import re as _re
+    low = text.lower()
+    # Our prompts teach agents to say ``BLOCKED: <reason>``; catch that first.
+    if _re.search(r"\bblocked[:\s]", low):
+        return True
+    # Reviewer / security subagents return ``{"verdict": "BLOCK" | "REQUEST_CHANGES"}``;
+    # the orchestrator usually parrots that verbatim.
+    if _re.search(r'"verdict"\s*:\s*"(?:block|request_changes)"', low):
+        return True
+    if _re.search(r"\bverdict[:\s=\"]+(?:block|request_changes)\b", low):
+        return True
+    # Common give-up phrases we've observed in production logs.
+    for phrase in (
+        "unable to complete",
+        "cannot proceed",
+        "giving up on this",
+        "abandoning this",
+        "task failed",
+    ):
+        if phrase in low:
+            return True
+    return False
+
 # Circuit breaker: if the block-rate in the last CIRCUIT_WINDOW_SEC exceeds
 # CIRCUIT_BLOCK_THRESHOLD, pause the loop for CIRCUIT_COOLDOWN_SEC. Prevents
 # burning API quota (and flooding Telegram) when something systemic is wrong —
@@ -342,7 +374,7 @@ async def run_once(
                 timeout=settings.per_feature_timeout_sec,
             )
             last = result["messages"][-1].content if result.get("messages") else ""
-            claimed = "blocked" if "blocked" in last.lower()[:200] else "done"
+            claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
             ok, reason = verify_changes(feature)
             verdict = claimed if (claimed == "blocked" or ok) else "blocked"
             if verdict == "done":

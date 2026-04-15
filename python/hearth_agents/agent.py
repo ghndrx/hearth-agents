@@ -20,6 +20,7 @@ from .tools import (
     git_status,
     git_worktree_add,
     git_worktree_remove,
+    record_planner_estimate,
     repo_reindex,
     repo_search,
     run_command,
@@ -46,6 +47,7 @@ ORCHESTRATOR_TOOLS = [
     git_branch_create,
     git_worktree_add,
     git_worktree_remove,
+    record_planner_estimate,
 ]
 
 

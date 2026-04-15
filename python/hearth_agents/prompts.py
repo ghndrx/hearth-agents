@@ -81,6 +81,12 @@ Reject the plan and re-plan (up to 2 attempts) if any of:
   - ``tests`` is empty
 
 Only AFTER the plan is accepted:
+  - Call ``record_planner_estimate(feature_id=<id>, estimated_diff_lines=<n>)``
+    using the planner's ``estimated_diff_lines`` field. The verifier cross-checks
+    this later — if actual diff exceeds 1.5x this value, the feature blocks
+    as "planner_undercount" rather than silently blowing the 600-line cap.
+    SKIP THIS CALL and the verifier has no baseline, making large-diff failures
+    indistinguishable from planning errors.
   - Call ``write_todos`` with the planner's ``files_touched`` as items.
   - For each target repo, call ``git_worktree_add`` to get an isolated path.
 

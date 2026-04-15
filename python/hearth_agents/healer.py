@@ -48,6 +48,14 @@ def _hint_for_reason(reason: str) -> str:
             "<300 lines of diff. If the feature genuinely cannot be sliced, "
             "report 'BLOCKED: needs decomposition' rather than over-shipping."
         )
+    if "planner_undercount" in r:
+        return (
+            "PRIOR FAILURE: actual diff exceeded planner's estimate by >1.5x. "
+            "The planner under-estimated the scope. This time, have the planner "
+            "either (a) raise estimated_diff_lines to a realistic value, or "
+            "(b) split the feature into per-concern sub-features BEFORE delegating. "
+            "Do not re-run the same plan hoping for a smaller diff."
+        )
     if "tests failed" in r:
         return (
             "PRIOR FAILURE: the test suite failed last attempt. Read the failing "

@@ -209,8 +209,15 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
     committed: list[str] = []
     pushed: list[str] = []
     oversized: list[str] = []
+    undercount: list[str] = []
     test_failures: list[str] = []
     complexity_failures: list[str] = []
+
+    # Undercount threshold from research job #3673: 1.5x the planner's estimate
+    # is the sweet spot — tight enough to catch runaway implementations, loose
+    # enough to tolerate normal variance. Only enforced when the planner
+    # actually recorded an estimate (``record_planner_estimate`` tool).
+    UNDERCOUNT_RATIO = 1.5
 
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -229,6 +236,16 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
         lines = _diff_stat(wt, base)
         if lines > DIFF_LINE_CAP:
             oversized.append(f"{repo_name} ({lines} lines)")
+            continue
+
+        # Planner-undercount gate: if the planner recorded an estimate and the
+        # actual diff overshot it by >UNDERCOUNT_RATIO, block this run. The
+        # heal_hint path will surface "planner_undercount" to the next attempt
+        # so the orchestrator can re-plan with a larger estimate or split
+        # instead of silently chewing to the hard diff cap.
+        est = getattr(feature, "planner_estimate_lines", 0)
+        if est > 0 and lines > est * UNDERCOUNT_RATIO:
+            undercount.append(f"{repo_name} ({lines} actual vs {est} estimated, {lines/est:.1f}x)")
             continue
 
         # Complexity gate: any function with cyclomatic complexity over the
@@ -256,6 +273,8 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
         return True, f"pushed to: {', '.join(pushed)}"
     if oversized:
         return False, f"diff too large (>{DIFF_LINE_CAP} lines): {', '.join(oversized)}"
+    if undercount:
+        return False, f"planner_undercount: {', '.join(undercount)}"
     if complexity_failures:
         return False, "; ".join(complexity_failures)
     if test_failures:

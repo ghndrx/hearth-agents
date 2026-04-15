@@ -49,6 +49,12 @@ class Feature:
     # each child's parent_id points at the original. Lets us reconstruct
     # the high-level intent and avoid re-splitting children recursively.
     parent_id: str = ""
+    # Planner's pre-execution estimate of total diff lines. Recorded via the
+    # ``record_planner_estimate`` tool after the planner subagent returns its
+    # JSON. verify_changes compares this against the actual diff and flags
+    # undercount (>1.5x) as a blocker — catches planner-under-estimation
+    # before it burns verifier iterations (research job #3673).
+    planner_estimate_lines: int = 0
 
 
 # Initial backlog. The idea engine appends to this over time.
