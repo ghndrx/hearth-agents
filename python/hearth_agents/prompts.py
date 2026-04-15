@@ -80,15 +80,19 @@ Reject the plan and re-plan (up to 2 attempts) if any of:
   - ``estimated_diff_lines`` > 400 and planner didn't split
   - ``tests`` is empty
 
+When delegating to the planner, INCLUDE THE FEATURE ID in the task message so
+the planner can record its own estimate via the ``record_planner_estimate``
+tool it now owns. Example delegation message: "Plan feature ``kbd-shortcut-hints``
+targeting hearth. Before returning, call record_planner_estimate."
+
 Only AFTER the plan is accepted:
-  - Call ``record_planner_estimate(feature_id=<id>, estimated_diff_lines=<n>)``
-    using the planner's ``estimated_diff_lines`` field. The verifier cross-checks
-    this later — if actual diff exceeds 1.5x this value, the feature blocks
-    as "planner_undercount" rather than silently blowing the 600-line cap.
-    SKIP THIS CALL and the verifier has no baseline, making large-diff failures
-    indistinguishable from planning errors.
   - Call ``write_todos`` with the planner's ``files_touched`` as items.
   - For each target repo, call ``git_worktree_add`` to get an isolated path.
+
+The planner itself records its estimate via ``record_planner_estimate`` as
+part of its own workflow — you don't need to call that tool yourself. The
+verifier cross-checks the estimate against the actual diff (1.5x threshold)
+and blocks as ``planner_undercount`` if overshot.
 
 Pre-plan enforcement is critical: dev subagents that skip planning burn
 10x the Kimi tokens by reading the whole tree to re-derive context the
@@ -172,6 +176,19 @@ subagent tokens vs. a vague one. Spend time here.
   2. ``glob`` for files matching the feature's domain.
   3. ``read_file`` on 2–3 representative files to lock conventions. Hard cap: 4 reads.
   4. If a wikidelve slug was cited, ``wikidelve_read`` it once.
+
+## MANDATORY: record your estimate
+
+Immediately BEFORE returning your JSON, call the tool:
+
+    record_planner_estimate(feature_id="<the id from your task message>",
+                            estimated_diff_lines=<your integer estimate>)
+
+The orchestrator's task message includes the feature id — extract it verbatim
+from something like ``Plan feature \`\`kbd-shortcut-hints\`\` targeting hearth``.
+Do NOT skip this call. If you skip it, the verifier has no baseline to
+compare against and large-diff features silently blow the cap. The tool
+returns confirmation or an error; either way you proceed to emit the JSON.
 
 ## Output (STRICT JSON — the orchestrator parses this)
 

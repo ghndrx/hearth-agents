@@ -94,6 +94,13 @@ async def run_healer(backlog: Backlog) -> None:
                 except Exception as e:  # noqa: BLE001
                     reason = f"healer could not re-verify: {e}"
                 f.heal_hint = _hint_for_reason(reason)
+                # planner_undercount needs the stale estimate cleared — the
+                # next planner run has to produce a larger estimate (or split),
+                # not re-use the old underestimate that keeps tripping the
+                # 1.5x gate. heal_hint already tells the planner what to do;
+                # zeroing the field lets an unestimated replan succeed too.
+                if "planner_undercount" in reason and getattr(f, "planner_estimate_lines", 0) > 0:
+                    f.planner_estimate_lines = 0
                 f.heal_attempts += 1
                 f.status = "pending"
                 healed.append(f"{f.id} (attempt {f.heal_attempts}/{HEAL_MAX_ATTEMPTS})")

@@ -21,6 +21,7 @@ from .prompts import (
 from .tools import (
     git_commit,
     git_status,
+    record_planner_estimate,
     repo_search,
     run_command,
     web_search,
@@ -50,7 +51,7 @@ def build_subagents() -> list[dict[str, Any]]:
                 "Use before delegating to a dev subagent when the feature spans >3 files."
             ),
             "system_prompt": PLANNER_INSTRUCTIONS,
-            "tools": [wikidelve_search, wikidelve_read, web_search],
+            "tools": [wikidelve_search, wikidelve_read, web_search, record_planner_estimate, repo_search],
         },
         {
             "name": "backend-dev",
