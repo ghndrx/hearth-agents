@@ -185,20 +185,6 @@ class Backlog:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
 
-
-# Module-level registry of the "default" (main-process) Backlog instance. Set
-# by __init__ so tools (like ``record_planner_estimate``) can mutate the live
-# in-memory state directly instead of writing to disk and racing with the
-# in-memory instance's save(). This keeps a single source of truth.
-_default_backlog: "Backlog | None" = None
-
-
-def get_default_backlog() -> "Backlog | None":
-    """Return the Backlog instance registered by the first __init__ call, or
-    None if no Backlog has been instantiated yet. Tools should use this to
-    mutate live state rather than writing the JSON file directly."""
-    return _default_backlog
-
     def next_pending(self) -> Feature | None:
         """Self-improvement features always jump the queue ahead of product
         features at the same priority band — the agent cannot help the user
@@ -250,3 +236,17 @@ def get_default_backlog() -> "Backlog | None":
             counts[f.status] = counts.get(f.status, 0) + 1
         counts["total"] = len(self.features)
         return counts
+
+
+# Module-level registry of the "default" (main-process) Backlog instance. Set
+# by __init__ so tools (like ``record_planner_estimate``) can mutate the live
+# in-memory state directly instead of writing to disk and racing with the
+# in-memory instance's save(). Single source of truth.
+_default_backlog: "Backlog | None" = None
+
+
+def get_default_backlog() -> "Backlog | None":
+    """Return the Backlog instance registered by the first __init__ call, or
+    None if no Backlog has been instantiated yet. Tools should use this to
+    mutate live state rather than writing the JSON file directly."""
+    return _default_backlog
