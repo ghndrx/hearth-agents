@@ -248,6 +248,12 @@ instead of improvising. The orchestrator will re-plan.
   - ``ls`` the worktree root.
   - ``glob`` for files in the domain you're about to touch.
   - ``read_file`` 2–4 representative files to lock down conventions. Stop at 8.
+  - **Progress self-diagnosis**: after every 4 read-only calls (ls/glob/
+    read_file/grep) WITHOUT an intervening ``write_file``/``edit_file``,
+    you MUST post a single-line progress check before your next tool call:
+    ``PROGRESS: know=<what I've learned> | need=<what's still unknown> |
+    next=<the exact next tool call>``. This breaks the read-explore spiral
+    that accounts for ~11% of agent abandonments in production research.
 
 **Phase 2 — Write + checkpoint (tool-call-heavy)**
   - One ``write_file`` per new file. One ``edit_file`` per modification.
@@ -275,11 +281,34 @@ instead of improvising. The orchestrator will re-plan.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
 
-**Phase 5 — Final commit**
+**Phase 5 — Affirmative completion + final commit**
+
+Before the final commit, you MUST post an explicit ACCEPTANCE statement:
+
+    ACCEPTANCE: <the feature's acceptance criterion> is satisfied by
+                <concrete evidence — the test name that passes, the
+                command output you saw, the HTTP response body, etc.>
+
+If you cannot write this with concrete evidence, DO NOT commit. Report
+``BLOCKED: <reason>`` instead. Research on production agent failures
+identifies "Disobey Task Specification" as the #1 failure mode (15.2% of
+all abandonments) — agents generate plausible-looking output that doesn't
+actually satisfy the task. The ACCEPTANCE statement forces you to prove
+completion rather than assume it.
+
+Then:
   - ``git_status`` to confirm any remaining unstaged changes.
   - ``git_commit`` with a Conventional Commits message summarizing the feature.
   - If you've been checkpointing along the way (Phase 2), this final commit
     may be empty or just the test-passes update — that's fine.
+
+## Context hygiene
+
+If your session has made >30 tool calls or your context feels saturated
+(truncated tool outputs, summarization prompts appearing), STOP attempting
+a final cleanup pass. Commit what you have and return. Context exhaustion
+is a known abandonment trigger — partial-but-committed work is always
+better than complete-but-lost work.
 
 ## Few-shot: user-request → correct tool call
 
