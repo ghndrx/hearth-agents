@@ -424,6 +424,21 @@ async def run_once(
     # so we don't infinitely spin.
     MAX_FIXUPS = 4
     FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount")
+    # Patterns inside the verifier reason or test output that signal the
+    # failure cannot be solved by another attempt — research shows ~90% of
+    # retry budget gets wasted on these. Bail to next feature instead of
+    # burning the full MAX_FIXUPS budget. Conservative list: only patterns
+    # we've actually observed as repeatable failure modes.
+    UNSOLVABLE_SIGNALS = (
+        "no such file or directory: 'go'",      # missing toolchain
+        "no such file or directory: 'pnpm'",    # missing toolchain
+        "command not found: cargo",             # missing toolchain
+        "permission denied",                    # filesystem permission
+        "401 unauthorized",                     # external API auth
+        "403 forbidden",                        # external API auth
+        "no space left on device",              # disk full
+        "could not resolve host",               # network
+    )
 
     try:
         attempt = 0
@@ -468,6 +483,13 @@ async def run_once(
                 break
             if not any(reason.startswith(p) for p in FIXABLE_PREFIXES):
                 break  # non-fixable blocks (e.g. no worktree at all) won't improve
+            # Early bail on known-unsolvable error signatures (research #3784:
+            # ~90% of retry budget gets wasted on errors no retry can fix).
+            reason_lower = reason.lower()
+            unsolvable = next((s for s in UNSOLVABLE_SIGNALS if s in reason_lower), None)
+            if unsolvable:
+                log.warning("feature_unsolvable", id=feature.id, signal=unsolvable, attempt=attempt)
+                break  # bail; saves remaining retries for features that can succeed
             if reason == prior_reason:
                 log.warning("feature_deadlock", id=feature.id, reason=reason, attempt=attempt)
                 break  # loop signature — same failure twice, bail

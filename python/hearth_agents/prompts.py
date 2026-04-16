@@ -249,14 +249,25 @@ instead of improvising. The orchestrator will re-plan.
   - ``glob`` for files in the domain you're about to touch.
   - ``read_file`` 2–4 representative files to lock down conventions. Stop at 8.
 
-**Phase 2 — Write (tool-call-heavy)**
+**Phase 2 — Write + checkpoint (tool-call-heavy)**
   - One ``write_file`` per new file. One ``edit_file`` per modification.
   - Do not ``read_file`` the same path twice unless something changed.
+  - **CHECKPOINT after every logical unit of work** — production research is
+    clear: agents that only commit at the end lose everything when the session
+    ends abnormally. After each completed file (production code → its test),
+    call ``git_commit`` with an incremental message like
+    ``wip(<scope>): add <thing>``. Multiple wip commits per feature is FINE
+    and expected; the reviewer + verifier handle the diff as a whole.
+    Never sit on >2 uncommitted files.
 
-**Phase 3 — Test**
+**Phase 3 — Test (write tests + RUN them BEFORE the final commit)**
   - Create at least one test file exercising the new behavior.
   - Language conventions: Go → ``*_test.go`` in same package;
     TS/Svelte → ``*.test.ts`` co-located or under ``tests/``.
+  - **MANDATORY: run the test command via ``run_command`` and confirm exit=0
+    BEFORE Phase 5.** If tests fail here, fix in-session — every test failure
+    that escapes to the verifier costs a full retry cycle (10 min + Kimi quota).
+    Show the passing test output in your message before claiming done.
 
 **Phase 4 — Self-verify (iterate until green, cap 3 attempts)**
   - ``run_command`` the stack's test + lint commands in the worktree.
@@ -264,9 +275,11 @@ instead of improvising. The orchestrator will re-plan.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
 
-**Phase 5 — Commit**
-  - ``git_status`` to confirm changes.
-  - ``git_commit`` with a Conventional Commits message.
+**Phase 5 — Final commit**
+  - ``git_status`` to confirm any remaining unstaged changes.
+  - ``git_commit`` with a Conventional Commits message summarizing the feature.
+  - If you've been checkpointing along the way (Phase 2), this final commit
+    may be empty or just the test-passes update — that's fine.
 
 ## Few-shot: user-request → correct tool call
 
