@@ -95,7 +95,6 @@ def git_status(repo_path: str) -> str:
     return f"{status}\n\ndiff vs {base}: {dout.strip()}{note}"
 
 
-@tool
 _BLOCKED_COMMIT_PATTERNS = (
     "node_modules/",
     ".pnpm-store/",
@@ -134,6 +133,7 @@ def _scrub_blocked_paths(repo_path: str) -> tuple[int, list[str]]:
     return len(bad), bad[:5]
 
 
+@tool
 def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = True) -> str:
     """Stage, commit, and (by default) push the current branch.
 
