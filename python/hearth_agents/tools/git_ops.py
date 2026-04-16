@@ -96,12 +96,54 @@ def git_status(repo_path: str) -> str:
 
 
 @tool
+_BLOCKED_COMMIT_PATTERNS = (
+    "node_modules/",
+    ".pnpm-store/",
+    "dist/",
+    "build/",
+    "target/",
+    ".next/",
+    ".svelte-kit/",
+    ".venv/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".turbo/",
+    "coverage/",
+)
+
+
+def _scrub_blocked_paths(repo_path: str) -> tuple[int, list[str]]:
+    """Unstage any paths matching known build-artifact / dependency-cache
+    patterns before commit. Returns (unstaged_count, sample_paths).
+
+    Observed in production: one feature committed the repo's ``.pnpm-store``
+    producing a 444,076-line diff that tripped the verifier's size cap.
+    Rather than rejecting the commit entirely, we scrub the offending paths
+    and let the real code-change commit through. Keeps the agent unblocked
+    while keeping the diff clean.
+    """
+    code, out = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, timeout=10)
+    if code != 0:
+        return 0, []
+    bad = [p for p in out.splitlines() if any(sig in p for sig in _BLOCKED_COMMIT_PATTERNS)]
+    if not bad:
+        return 0, []
+    # git rm --cached -r -- <path> preserves the worktree file but unstages it
+    for path in bad:
+        _run(["git", "rm", "--cached", "-r", "--", path], cwd=repo_path, timeout=10)
+    return len(bad), bad[:5]
+
+
 def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = True) -> str:
     """Stage, commit, and (by default) push the current branch.
 
     Commit and push are coupled because earlier runs committed locally and
     never pushed, leaving origin out of sync and the verifier retrying forever.
     Pushing here makes "committed" mean "durable on origin" for the pipeline.
+
+    Before committing, scrubs known build-artifact paths (node_modules/,
+    .pnpm-store/, dist/, etc.) from the staging area. Addresses the
+    400k-line-diff failure mode caused by one feature committing .pnpm-store.
 
     Args:
         repo_path: Absolute path to the repo/worktree.
@@ -114,6 +156,10 @@ def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = 
         code, out = _run(["git", "add", "-A"], cwd=repo_path, timeout=15)
         if code != 0:
             return f"git add failed: {out}"
+    # Scrub blocked paths AFTER staging so `git add -A` can't resurrect them.
+    scrubbed, sample = _scrub_blocked_paths(repo_path)
+    if scrubbed:
+        log.warning("git_commit_scrubbed_paths", repo=repo_path, count=scrubbed, sample=sample)
     code, out = _run(["git", "commit", "-m", message], cwd=repo_path, timeout=15)
     if code != 0:
         return f"commit failed: {out}"
