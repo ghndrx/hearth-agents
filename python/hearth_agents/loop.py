@@ -524,7 +524,20 @@ async def run_once(
             await notifier.send(f"✅ [w{worker_id}] done {feature.id}: {feature.name}{suffix}")
     except asyncio.TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
-        backlog.set_status(feature.id, "blocked")
+        # Rescue BEFORE marking blocked — the timeout may have killed the
+        # agent mid-write, leaving real code uncommitted in the worktree.
+        # Without this call, a 10-min timeout discards N files of legit work.
+        # Observed in production: 3 of 5 blocked features had 6+ uncommitted
+        # files that the rescue path never touched because it sat inside the
+        # normal post-ainvoke branch only.
+        _rescue_uncommitted_worktrees(feature)
+        # Re-verify after rescue — if the rescued commit is substantive, the
+        # feature might actually pass the gates now.
+        ok, reason = verify_changes(feature)
+        verdict = "done" if ok else "blocked"
+        backlog.set_status(feature.id, verdict)
+        if verdict == "done":
+            log.info("feature_timeout_rescued", id=feature.id)
         await notifier.send_coalesced(
             "timeout",
             f"⏱️ feature timeout after {settings.per_feature_timeout_sec}s — further timeouts suppressed for 1h",
@@ -570,7 +583,16 @@ async def run_once(
             )
         else:
             log.exception("feature_failed", id=feature.id, error=str(e))
-            backlog.set_status(feature.id, "blocked")
+            # Rescue before marking blocked — same rationale as the timeout
+            # branch: the exception may have killed the agent mid-write. Don't
+            # discard real uncommitted code just because something downstream
+            # of write_file threw.
+            _rescue_uncommitted_worktrees(feature)
+            ok, reason = verify_changes(feature)
+            verdict = "done" if ok else "blocked"
+            backlog.set_status(feature.id, verdict)
+            if verdict == "done":
+                log.info("feature_exception_rescued", id=feature.id)
             # Generic failures are logged but NOT sent to Telegram anymore —
             # they were the biggest residual source of spam. The healer's
             # batched reset alert covers the aggregate signal.
