@@ -92,6 +92,16 @@ def _hint_for_reason(reason: str) -> str:
             "(b) split the feature into per-concern sub-features BEFORE delegating. "
             "Do not re-run the same plan hoping for a smaller diff."
         )
+    if "no test file in diff" in r:
+        return (
+            "PRIOR FAILURE: the diff contained zero test files. You shipped "
+            "production code but no regression coverage. This time you MUST "
+            "create or modify at least one test file per language convention "
+            "(Go: *_test.go in the same package; TS/Svelte: *.test.ts co-"
+            "located; Python: tests/test_*.py). The test must actually "
+            "exercise the new behavior — a test that only asserts True "
+            "passes but catches nothing."
+        )
     if "tests failed" in r:
         return (
             "PRIOR FAILURE: the test suite failed last attempt. Read the failing "

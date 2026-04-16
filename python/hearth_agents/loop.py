@@ -423,7 +423,7 @@ async def run_once(
     # catches. Still aborts on loop-signature deadlock (same reason twice)
     # so we don't infinitely spin.
     MAX_FIXUPS = 4
-    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount")
+    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff")
     # Patterns inside the verifier reason or test output that signal the
     # failure cannot be solved by another attempt — research shows ~90% of
     # retry budget gets wasted on these. Bail to next feature instead of
@@ -481,7 +481,12 @@ async def run_once(
             verdict = claimed if (claimed == "blocked" or ok) else "blocked"
             if verdict == "done":
                 break
-            if not any(reason.startswith(p) for p in FIXABLE_PREFIXES):
+            # Substring match (not startswith) — verify_changes prefixes each
+            # reason with the repo name (e.g. "hearth: tests failed: …"), so
+            # startswith would never match. This has silently been preventing
+            # retries on test failures for a while; substring is what the
+            # heal_hint code uses and works correctly.
+            if not any(p in reason for p in FIXABLE_PREFIXES):
                 break  # non-fixable blocks (e.g. no worktree at all) won't improve
             # Early bail on known-unsolvable error signatures (research #3784:
             # ~90% of retry budget gets wasted on errors no retry can fix).

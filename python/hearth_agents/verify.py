@@ -197,6 +197,52 @@ def _diff_is_prompt_only(worktree: Path, base: str, repo_name: str) -> bool:
     return all(f == "python/hearth_agents/prompts.py" for f in files)
 
 
+# Heuristics for "this path is a test file" per language. Conservative —
+# we'd rather let an edge-case test through than fabricate a false positive.
+_TEST_FILE_SIGNALS = (
+    "_test.go",         # Go: foo_test.go
+    ".test.ts",         # TS/Svelte: foo.test.ts
+    ".test.tsx",
+    ".test.js",
+    ".spec.ts",
+    ".spec.tsx",
+    ".spec.js",
+    "/tests/",          # Python pytest, Rust integration
+    "/test/",
+    "/__tests__/",      # JS/TS convention
+    "test_",            # Python: tests/test_foo.py
+    "_test.rs",         # Rust: foo_test.rs
+    "_test.py",         # Python alt: foo_test.py
+)
+
+
+def _diff_includes_tests(worktree: Path, base: str, repo_name: str) -> bool:
+    """True iff at least one changed path looks like a test file.
+
+    Requires each feature's diff to touch a test file, regardless of whether
+    the overall test runner passes. Without this, agents pass the test gate
+    simply by not breaking existing tests, then ship production-only diffs
+    that have zero regression coverage for the new behavior.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--name-only", f"{base}...HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if r.returncode != 0:
+        return False
+    files = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    for f in files:
+        if any(sig in f for sig in _TEST_FILE_SIGNALS):
+            return True
+    return False
+
+
 def verify_changes(feature: Feature) -> tuple[bool, str]:
     """Check whether the feature actually produced *pushed* changes.
 
@@ -261,6 +307,18 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
         # a new test for every prompt tweak just blocks legitimate work, which
         # is exactly why earlier self-tune features kept landing in `blocked`.
         if not _diff_is_prompt_only(wt, base, repo_name):
+            # Coverage gate: require the diff to include at least one test
+            # file. Without this, agents ship production-only diffs that pass
+            # the test runner (because existing tests still pass) but have
+            # zero regression coverage for the new behavior. User request:
+            # "create unit tests on each feature that way it prevents
+            # regression and identifies successful outcomes."
+            if not _diff_includes_tests(wt, base, repo_name):
+                test_failures.append(
+                    f"{repo_name}: no test file in diff — add a test exercising "
+                    "the new behavior before claiming done"
+                )
+                continue
             ok, reason = _run_tests(wt, repo_name)
             if not ok:
                 test_failures.append(f"{repo_name}: {reason}")
