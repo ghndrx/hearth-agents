@@ -437,12 +437,11 @@ async def run_once(
 
     # Bounded self-correction: if the verifier blocks on a fixable reason
     # Bounded self-correction: allow MAX_FIXUPS retries for recoverable
-    # failures. Raised from 2 → 4 because the triage showed 6/12 blocks were
-    # "tests failed" that ran out of attempts — Kimi has plenty of quota left,
-    # and failing tests are exactly the kind of thing an extra 2 retries
-    # catches. Still aborts on loop-signature deadlock (same reason twice)
-    # so we don't infinitely spin.
-    MAX_FIXUPS = 4
+    # failures. Env-configurable (``MAX_FIXUPS`` → settings.max_fixups) so
+    # ops can dial it up when quota is plentiful or down under pressure
+    # without a code push. Still aborts on loop-signature deadlock (same
+    # reason twice) so we don't infinitely spin.
+    MAX_FIXUPS = settings.max_fixups
     FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff")
     # Patterns inside the verifier reason or test output that signal the
     # failure cannot be solved by another attempt — research shows ~90% of
@@ -487,7 +486,19 @@ async def run_once(
                 active_provider=active_provider,
             )
             result = await asyncio.wait_for(
-                active.ainvoke({"messages": [{"role": "user", "content": prompt}]}),
+                active.ainvoke(
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={
+                        "metadata": {
+                            "feature_id": feature.id,
+                            "feature_name": feature.name,
+                            "worker": worker_id,
+                            "attempt": attempt,
+                            "provider": active_provider,
+                        },
+                        "tags": [f"feature:{feature.id}", f"worker:{worker_id}", active_provider],
+                    },
+                ),
                 timeout=settings.per_feature_timeout_sec,
             )
             last = result["messages"][-1].content if result.get("messages") else ""

@@ -11,9 +11,12 @@ import hmac
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from .backlog import Backlog
 from .config import settings
+from .kanban_html import KANBAN_HTML
 from .logger import log
 
 
@@ -21,9 +24,50 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
     """Construct the FastAPI app with shared backlog + agent state."""
     app = FastAPI(title="hearth-agents", version="0.2.0")
 
+    # Permissive CORS so the kanban at hearth-agents.walleye-frog.ts.net can
+    # fetch /features from a browser on any device on the tailnet. We only
+    # bind to 127.0.0.1 + tailscale serve, so CORS is a UX affordance rather
+    # than the security boundary — Tailscale auth is.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|[^/]*\.walleye-frog\.ts\.net)(:\d+)?",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"status": "ok", "stats": backlog.stats()}
+
+    @app.get("/features")
+    async def list_features(status: str | None = None) -> list[dict[str, Any]]:
+        """All features (or a single status slice) as lightweight dicts for
+        the kanban UI. Ordered newest-first so the board top is current work."""
+        features = backlog.features
+        if status:
+            features = [f for f in features if f.status == status]
+        return sorted(
+            (f.to_dict() for f in features),
+            key=lambda d: d["created_at"],
+            reverse=True,
+        )
+
+    @app.post("/features/{feature_id}/action")
+    async def feature_action(feature_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply a kanban action. Body: {"action": "approve|retry|nuke"}."""
+        action = payload.get("action", "")
+        ok, message = backlog.action(feature_id, action)
+        if not ok:
+            raise HTTPException(status_code=400, detail=message)
+        log.info("kanban_action", feature=feature_id, action=action, result=message)
+        return {"ok": True, "message": message}
+
+    @app.get("/kanban", response_class=HTMLResponse)
+    async def kanban() -> HTMLResponse:
+        """Single-page kanban UI. Served as a static string — no build step,
+        no frontend/ directory; Alpine.js via CDN does the rendering."""
+        return HTMLResponse(KANBAN_HTML)
 
     @app.get("/stats")
     async def stats() -> dict[str, Any]:

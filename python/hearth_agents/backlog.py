@@ -56,6 +56,26 @@ class Feature:
     # before it burns verifier iterations (research job #3673).
     planner_estimate_lines: int = 0
 
+    def to_dict(self) -> dict:
+        """Curated JSON representation for the kanban UI. Includes a derived
+        ``branch`` hint and truncated ``heal_hint`` so cards stay compact."""
+        branch = f"feat/{self.id}"
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description[:400],
+            "priority": self.priority,
+            "repos": list(self.repos),
+            "status": self.status,
+            "created_at": self.created_at,
+            "heal_attempts": self.heal_attempts,
+            "heal_hint": self.heal_hint[:500],
+            "self_improvement": self.self_improvement,
+            "parent_id": self.parent_id,
+            "planner_estimate_lines": self.planner_estimate_lines,
+            "branch": branch,
+        }
+
 
 # Initial backlog. The idea engine appends to this over time.
 INITIAL_FEATURES: list[Feature] = [
@@ -236,6 +256,40 @@ class Backlog:
             counts[f.status] = counts.get(f.status, 0) + 1
         counts["total"] = len(self.features)
         return counts
+
+    def action(self, feature_id: str, action: str) -> tuple[bool, str]:
+        """Apply a kanban action to a feature. Returns (success, message).
+
+        Actions:
+        - ``approve``: mark a blocked feature as human-verified done. Clears
+          heal state so re-queues don't carry stale hints.
+        - ``retry``:   reset heal_attempts and flip blocked → pending so the
+          loop takes another crack. This is the "maybe another attempt fixes
+          it" path — distinct from approve which asserts human verification.
+        - ``nuke``:    drop the feature from the backlog. Irreversible. Used
+          for debris features the agent will never productively resolve.
+        """
+        for i, f in enumerate(self.features):
+            if f.id != feature_id:
+                continue
+            if action == "approve":
+                f.status = "done"
+                f.heal_hint = ""
+                f.heal_attempts = 0
+                self.save()
+                return True, f"{feature_id} -> done"
+            if action == "retry":
+                f.status = "pending"
+                f.heal_attempts = 0
+                f.heal_hint = ""
+                self.save()
+                return True, f"{feature_id} -> pending"
+            if action == "nuke":
+                self.features.pop(i)
+                self.save()
+                return True, f"{feature_id} removed"
+            return False, f"unknown action: {action}"
+        return False, f"feature not found: {feature_id}"
 
 
 # Module-level registry of the "default" (main-process) Backlog instance. Set

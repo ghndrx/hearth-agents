@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     # Wikidelve (deep research service)
     wikidelve_url: str = ""
 
+    # Langfuse (LLM observability). Empty keys disable tracing so local dev
+    # and first-boot containers don't fail when the Langfuse stack isn't up.
+    # Host defaults to the sibling container; override to a Tailscale hostname
+    # when pointing a dev agent at a remote Langfuse instance.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://langfuse-web:3000"
+
     # Serper (web search fallback)
     serper_api_key: str = ""
 
@@ -48,6 +56,12 @@ class Settings(BaseSettings):
     # Wall-clock timeout for a single feature's agent.ainvoke call. Stopgap for
     # ``self-hard-kill-switch`` — prevents runaway features from chewing quota.
     per_feature_timeout_sec: int = 1800
+    # Max in-loop fixup retries per feature before giving up and marking
+    # blocked. Distinct from healer retries (HEAL_MAX_ATTEMPTS in healer.py).
+    # Raise when Kimi/MiniMax have quota headroom and failures cluster on
+    # "tests failed" — those benefit from another swing; lower when quota is
+    # tight and marginal retries are chewing budget without closing features.
+    max_fixups: int = 6
     # When both providers are healthy, what fraction of features should be
     # routed to the fallback (MiniMax)? 0.5 = even split, 1.0 = always MiniMax
     # when healthy, 0.0 = always Kimi. Raise when MiniMax has more headroom

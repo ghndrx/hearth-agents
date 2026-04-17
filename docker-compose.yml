@@ -13,14 +13,55 @@ services:
       - ${REPOS_DIR:-./repos}:/repos
       - ./logs:/app/logs
     ports:
-      # Only exposed for the GitHub webhook receiver. Telegram uses long-poll,
-      # so no public ingress is required for the bot itself.
+      # Agent HTTP: GitHub webhooks, /stats, /features, /kanban. Tailscale
+      # serve exposes this publicly on hearth-agents.walleye-frog.ts.net.
       - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
+    depends_on:
+      langfuse-web:
+        condition: service_started
+
+  # ── Langfuse self-host ─────────────────────────────────────────────────────
+  # Two-service Langfuse v2 stack (web + postgres). Keeps all LLM traces
+  # on-box so we don't ship prompts/completions to a third party. Web is only
+  # bound to loopback; Tailscale serve exposes it on langfuse.walleye-frog.ts.net.
+  langfuse-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  langfuse-web:
+    image: langfuse/langfuse:2
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-}
+      SALT: ${LANGFUSE_SALT:-}
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
+      # Allow signup only until the first org is created; flip to false via
+      # env and redeploy once you've claimed the namespace.
+      AUTH_DISABLE_SIGNUP: "false"
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
 
 volumes:
   agent-data:
+  langfuse-postgres-data:
