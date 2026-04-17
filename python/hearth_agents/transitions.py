@@ -11,14 +11,29 @@ trail, not a cache. If disk becomes a concern, log-rotate externally.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from .logger import log
 
 _DEFAULT_PATH = Path(os.environ.get("TRANSITIONS_PATH", "/data/transitions.jsonl"))
+
+
+@lru_cache(maxsize=1)
+def prompts_version() -> str:
+    """Short sha of prompts.py at import time. Stamped into every transition
+    so operators can attribute block-rate deltas to prompt changes. Cached
+    per-process — a restart rolls to the new hash, which is exactly the
+    boundary we care about."""
+    try:
+        src = Path(__file__).with_name("prompts.py").read_bytes()
+        return hashlib.sha256(src).hexdigest()[:10]
+    except OSError:
+        return "unknown"
 
 
 def read_tail(limit: int = 500, feature_id: str | None = None) -> list[dict]:
@@ -70,6 +85,7 @@ def record_transition(
         "to": to_status,
         "reason": reason[:500],  # cap so a giant stack trace doesn't bloat lines
         "actor": actor,
+        "prompts_version": prompts_version(),
     }
     try:
         _DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)

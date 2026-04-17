@@ -66,6 +66,10 @@ KANBAN_HTML = r"""<!doctype html>
   .reasons .reason { background: #0d1117; border: 1px solid var(--border); padding: 2px 8px; border-radius: 3px; }
   .reasons .reason b { color: var(--blocked); margin-right: 4px; }
   .age { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .history-box { margin-top: 6px; padding: 6px 8px; background: #0a0d12; border-radius: 3px; font-size: 10px; color: var(--muted); border-left: 2px solid var(--impl); max-height: 160px; overflow: auto; }
+  .history-box .row { margin: 0; padding: 2px 0; display: block; }
+  .history-box .from-to { color: var(--fg); font-weight: 600; }
+  .history-box .ts { color: var(--muted); margin-right: 6px; }
 </style>
 </head>
 <body x-data="kanban()" x-init="init()">
@@ -121,8 +125,22 @@ KANBAN_HTML = r"""<!doctype html>
                 </template>
                 <a class="btn" :href="langfuseUrl(f.id)" target="_blank">trace</a>
                 <a class="btn" :href="ghBranchUrl(f)" target="_blank" x-show="f.status !== 'pending'">branch</a>
+                <button @click="toggleHistory(f.id)" x-text="history[f.id] ? 'hide history' : 'history'"></button>
                 <button class="nuke" @click="confirmNuke(f)">nuke</button>
               </div>
+              <template x-if="history[f.id]">
+                <div class="history-box">
+                  <template x-for="h in history[f.id]" :key="h.ts + h.to">
+                    <span class="row">
+                      <span class="ts" x-text="fmtTs(h.ts)"></span>
+                      <span class="from-to" x-text="(h.from || '—') + ' → ' + h.to"></span>
+                      <span x-show="h.actor" x-text="' [' + h.actor + ']'"></span>
+                      <span x-show="h.reason" x-text="' — ' + (h.reason || '').slice(0, 120)"></span>
+                    </span>
+                  </template>
+                  <div x-show="!history[f.id].length">no transitions recorded yet (pre-608d1ff features won't have any).</div>
+                </div>
+              </template>
             </div>
           </template>
           <div class="empty" x-show="!featuresByStatus(col.match).length">nothing here</div>
@@ -138,6 +156,7 @@ function kanban() {
   return {
     features: [],
     stats: null,
+    history: {},
     toast: '',
     toastErr: false,
     lastRefresh: Date.now(),
@@ -175,6 +194,25 @@ function kanban() {
       if (delta < 3600) return Math.floor(delta / 60) + 'm';
       if (delta < 86400) return Math.floor(delta / 3600) + 'h';
       return Math.floor(delta / 86400) + 'd';
+    },
+    fmtTs(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      return d.toISOString().slice(5, 16).replace('T', ' ');
+    },
+    async toggleHistory(id) {
+      if (this.history[id]) {
+        delete this.history[id];
+        return;
+      }
+      try {
+        const r = await fetch('/features/' + encodeURIComponent(id) + '/history');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const body = await r.json();
+        this.history[id] = body.transitions || [];
+      } catch (e) {
+        this.flash('history fetch failed: ' + e.message, true);
+      }
     },
     featuresByStatus(statuses) {
       return this.features.filter(f => statuses.includes(f.status));

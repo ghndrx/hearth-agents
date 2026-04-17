@@ -69,6 +69,30 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         no frontend/ directory; Alpine.js via CDN does the rendering."""
         return HTMLResponse(KANBAN_HTML)
 
+    @app.get("/config")
+    async def config_view() -> dict[str, Any]:
+        """Runtime configuration operators care about: loop dials, prompts
+        version, provider bias. Read-only — env changes require a restart.
+        Never returns secrets (api keys, tokens)."""
+        from .transitions import prompts_version
+        return {
+            "prompts_version": prompts_version(),
+            "loop": {
+                "workers": settings.loop_workers,
+                "max_fixups": settings.max_fixups,
+                "per_feature_timeout_sec": settings.per_feature_timeout_sec,
+                "minimax_bias": settings.minimax_bias,
+            },
+            "models": {
+                "minimax_model": settings.minimax_model,
+                "kimi_model": settings.kimi_model,
+            },
+            "flags": {
+                "product_features_enabled": settings.product_features_enabled,
+                "langfuse_enabled": bool(settings.langfuse_public_key and settings.langfuse_secret_key),
+            },
+        }
+
     @app.get("/transitions")
     async def transitions(limit: int = 500) -> list[dict[str, Any]]:
         """Recent status-change entries. Read from /data/transitions.jsonl,
