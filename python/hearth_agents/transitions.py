@@ -21,6 +21,34 @@ from .logger import log
 _DEFAULT_PATH = Path(os.environ.get("TRANSITIONS_PATH", "/data/transitions.jsonl"))
 
 
+def read_tail(limit: int = 500, feature_id: str | None = None) -> list[dict]:
+    """Read the last ``limit`` transition entries (optionally filtered to one
+    feature). Reads the whole file — fine up to ~tens of thousands of entries,
+    then we should switch to a reverse-line iterator. Empty list when the
+    file doesn't exist yet (no transitions recorded)."""
+    if not _DEFAULT_PATH.exists():
+        return []
+    try:
+        with _DEFAULT_PATH.open("r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        log.warning("transition_log_read_failed", err=str(e)[:200])
+        return []
+    out: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if feature_id and entry.get("feature_id") != feature_id:
+            continue
+        out.append(entry)
+    return out[-limit:]
+
+
 def record_transition(
     feature_id: str,
     from_status: str | None,

@@ -318,3 +318,61 @@ def git_push(repo_path: str, branch: str, set_upstream: bool = True) -> str:
         _run(["git", "remote", "set-url", "origin", original_url], cwd=repo_path, timeout=10)
 
     return out if code == 0 else f"push failed: {out}"
+
+
+def open_pr_if_possible(repo_path: str, branch: str, title: str, body: str) -> str:
+    """Open a pull request on origin for ``branch`` → default-base.
+
+    Plain function (not a @tool) so the loop can call it unconditionally
+    when a feature lands, without relying on the orchestrator to choose.
+    Agents can still open PRs by running ``gh`` via run_command if needed.
+
+    Returns a short status string; never raises. Requires
+    ``settings.github_token`` with ``repo`` scope. Skips silently when the
+    token is absent, when the PR already exists, or when the remote isn't
+    a GitHub HTTPS URL (self-hosted / git-ssh repos bypass this path).
+    """
+    token = settings.github_token
+    if not token:
+        return "skipped: no GITHUB_TOKEN"
+    code, origin_url = _run(["git", "remote", "get-url", "origin"], cwd=repo_path, timeout=10)
+    if code != 0 or "github.com" not in origin_url:
+        return f"skipped: remote not on github.com ({origin_url[:80]})"
+    # Parse owner/repo from https://github.com/OWNER/REPO(.git) — strip any
+    # embedded token first in case git_push left one in the URL.
+    clean = origin_url
+    if "@" in clean.replace("://", "").split("/")[0]:
+        clean = "https://" + clean.split("@", 1)[1]
+    parts = clean.rstrip("/").replace(".git", "").split("/")
+    if len(parts) < 5:
+        return f"skipped: cannot parse repo from {clean[:80]}"
+    owner, repo = parts[-2], parts[-1]
+    # Default base branch: develop for hearth (see git_ops.py:59), main elsewhere.
+    base = "develop" if repo == "hearth" else "main"
+    # httpx is already a project dep; keep this import local so the test
+    # suite's lazy-import stays lazy.
+    import httpx
+    try:
+        with httpx.Client(timeout=15) as c:
+            r = c.post(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json={"title": title[:200], "head": branch, "base": base, "body": body[:5000]},
+            )
+    except httpx.HTTPError as e:
+        return f"pr_api_error: {e}"
+    if r.status_code == 201:
+        url = r.json().get("html_url", "(no url)")
+        log.info("pr_opened", repo=repo, branch=branch, url=url)
+        return f"opened {url}"
+    if r.status_code == 422:
+        # 422 typically means "A pull request already exists for head/branch".
+        # Treat as success — the earlier PR is what we wanted.
+        log.info("pr_already_exists", repo=repo, branch=branch)
+        return "pr already exists"
+    log.warning("pr_open_failed", repo=repo, branch=branch, status=r.status_code, body=r.text[:200])
+    return f"pr_open_failed: {r.status_code} {r.text[:120]}"

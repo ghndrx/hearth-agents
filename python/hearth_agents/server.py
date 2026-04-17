@@ -69,6 +69,29 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         no frontend/ directory; Alpine.js via CDN does the rendering."""
         return HTMLResponse(KANBAN_HTML)
 
+    @app.get("/transitions")
+    async def transitions(limit: int = 500) -> list[dict[str, Any]]:
+        """Recent status-change entries. Read from /data/transitions.jsonl,
+        which only began populating with commit 608d1ff — older history
+        isn't here. Cap limit at 5000 to stop a runaway query from reading
+        an arbitrarily large file into memory."""
+        from .transitions import read_tail
+        capped = max(1, min(limit, 5000))
+        return read_tail(limit=capped)
+
+    @app.get("/features/{feature_id}/history")
+    async def feature_history(feature_id: str) -> dict[str, Any]:
+        """Per-feature transition timeline. Useful for RCA on 'why is
+        feature X still blocked' — returns every status change with
+        reason and actor in chronological order."""
+        from .transitions import read_tail
+        entries = read_tail(limit=5000, feature_id=feature_id)
+        feature = next((f for f in backlog.features if f.id == feature_id), None)
+        return {
+            "feature": feature.to_dict() if feature else None,
+            "transitions": entries,
+        }
+
     @app.get("/stats")
     async def stats() -> dict[str, Any]:
         """Operational stats: backlog breakdown, recent velocity, split + heal
@@ -94,6 +117,20 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         split_children = sum(1 for f in backlog.features if f.parent_id)
         hinted = sum(1 for f in backlog.features if f.heal_hint)
 
+        # Aggregate block reasons so operators can tell at a glance which
+        # failure mode dominates. Keyed off the heal_hint prefix rather than
+        # full text — different prompts produce different long-form hints
+        # but the prefix clusters by mode ("PRIOR FAILURE: tests failed"...).
+        block_reasons: dict[str, int] = {}
+        for f in backlog.features:
+            if f.status != "blocked":
+                continue
+            hint = f.heal_hint or "(no hint — first block attempt)"
+            # Take first 60 chars for clustering; full hint stays per-card.
+            key = hint[:60].strip().rstrip(":").rstrip(".") or "(blank)"
+            block_reasons[key] = block_reasons.get(key, 0) + 1
+        top_reasons = sorted(block_reasons.items(), key=lambda kv: -kv[1])[:10]
+
         return {
             "stats": backlog.stats(),
             "recent_24h": {
@@ -105,6 +142,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 "features_with_heal_attempts": healed,
                 "features_carrying_hint": hinted,
             },
+            "block_reasons_top10": [{"reason": r, "count": c} for r, c in top_reasons],
             "splitter": {"child_features": split_children},
             "rate_limit": {
                 "primary_cooldown_sec": max(0, int(_primary_cooldown_until - now_monotonic)),

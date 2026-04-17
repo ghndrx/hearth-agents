@@ -61,6 +61,11 @@ KANBAN_HTML = r"""<!doctype html>
   .bulk button[disabled] { opacity: 0.4; cursor: not-allowed; }
   .toast { position: fixed; bottom: 16px; right: 16px; background: var(--card); border: 1px solid var(--border); padding: 10px 14px; border-radius: 4px; font-size: 12px; max-width: 320px; }
   .toast.err { border-color: var(--blocked); }
+  .reasons { padding: 8px 16px; background: var(--card); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+  .reasons .label { color: var(--fg); font-weight: 600; }
+  .reasons .reason { background: #0d1117; border: 1px solid var(--border); padding: 2px 8px; border-radius: 3px; }
+  .reasons .reason b { color: var(--blocked); margin-right: 4px; }
+  .age { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body x-data="kanban()" x-init="init()">
@@ -72,6 +77,13 @@ KANBAN_HTML = r"""<!doctype html>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve all blocked</button>
     </div>
   </header>
+
+  <div class="reasons" x-show="stats && stats.block_reasons_top10 && stats.block_reasons_top10.length">
+    <span class="label">blocked by reason:</span>
+    <template x-for="r in (stats && stats.block_reasons_top10) || []" :key="r.reason">
+      <span class="reason" :title="r.reason"><b x-text="r.count"></b><span x-text="r.reason.slice(0, 50)"></span></span>
+    </template>
+  </div>
 
   <div class="board">
     <template x-for="col in columns" :key="col.key">
@@ -95,6 +107,7 @@ KANBAN_HTML = r"""<!doctype html>
                 <template x-if="f.heal_attempts > 0">
                   <span class="repo" x-text="'heal ' + f.heal_attempts + '/3'"></span>
                 </template>
+                <span class="age" :title="f.created_at" x-text="ageLabel(f.created_at)"></span>
               </div>
               <template x-if="f.heal_hint">
                 <div class="heal" x-text="f.heal_hint"></div>
@@ -124,6 +137,7 @@ KANBAN_HTML = r"""<!doctype html>
 function kanban() {
   return {
     features: [],
+    stats: null,
     toast: '',
     toastErr: false,
     lastRefresh: Date.now(),
@@ -144,14 +158,23 @@ function kanban() {
     },
     async refresh() {
       try {
-        const r = await fetch('/features');
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        this.features = await r.json();
+        const [fr, sr] = await Promise.all([fetch('/features'), fetch('/stats')]);
+        if (!fr.ok) throw new Error('features HTTP ' + fr.status);
+        this.features = await fr.json();
+        if (sr.ok) this.stats = await sr.json();
         this.lastRefresh = Date.now();
         this.sinceLabel = '0';
       } catch (e) {
         this.flash('refresh failed: ' + e.message, true);
       }
+    },
+    ageLabel(iso) {
+      if (!iso) return '';
+      const delta = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+      if (delta < 60) return delta + 's';
+      if (delta < 3600) return Math.floor(delta / 60) + 'm';
+      if (delta < 86400) return Math.floor(delta / 3600) + 'h';
+      return Math.floor(delta / 86400) + 'd';
     },
     featuresByStatus(statuses) {
       return this.features.filter(f => statuses.includes(f.status));

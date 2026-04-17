@@ -594,6 +594,32 @@ async def run_once(
                 list(feature.repos),
                 f"{feature.name} — {reason}. Priority {feature.priority}.",
             )
+            # Auto-open a PR per repo the feature touched so the kanban's
+            # "branch" link becomes a reviewable PR instead of a raw branch
+            # the operator has to manually turn into one. Fire-and-forget —
+            # failures (no token, already-exists) log and continue. Runs in
+            # a thread so we don't block the event loop on the HTTPS call.
+            try:
+                from pathlib import Path as _P
+                from .tools.git_ops import open_pr_if_possible
+                branch = f"feat/{feature.id}"
+                pr_body = (
+                    f"Autonomous implementation of **{feature.name}**.\n\n"
+                    f"{feature.description}\n\n"
+                    f"_Verifier: {reason}_"
+                )
+                pr_title = f"feat: {feature.name}"
+                for repo_name in feature.repos:
+                    repo_path = settings.repo_paths.get(repo_name)
+                    if not repo_path:
+                        continue
+                    wt = _P(repo_path).parent / f"worktrees-{_P(repo_path).name}" / branch
+                    target = str(wt) if wt.exists() else repo_path
+                    await asyncio.to_thread(
+                        open_pr_if_possible, target, branch, pr_title, pr_body
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("auto_pr_exception", id=feature.id, err=str(e)[:200])
         log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason, attempts=attempt + 1)
         # Only ping Telegram for successes. Failures get batched by the healer
         # (🩹) and escalations (🚨). Per-feature blocks were the biggest source
