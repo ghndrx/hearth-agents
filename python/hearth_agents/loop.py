@@ -442,7 +442,42 @@ async def run_once(
     # without a code push. Still aborts on loop-signature deadlock (same
     # reason twice) so we don't infinitely spin.
     MAX_FIXUPS = settings.max_fixups
-    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff")
+
+    def _detect_exploratory_spiral(messages: list) -> str | None:
+        """Post-ainvoke check: did the agent burn the session on reads with
+        no writes? Returns a reason string when a spiral is detected, else
+        None. Spirals are a top-3 timeout cause — we want to surface them
+        as their own block reason so the next-attempt prompt can give
+        targeted "stop reading, start writing" guidance.
+
+        Heuristic: count tool calls in AIMessage.tool_calls; flag when
+        reads/shell >= 6 AND writes == 0, or when the SAME file is read
+        3+ times in a row (classic re-reading-for-no-reason pattern).
+        """
+        reads = 0
+        writes = 0
+        shell = 0
+        last_read: list[str] = []
+        for m in messages or []:
+            tcs = getattr(m, "tool_calls", None) or []
+            for tc in tcs:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
+                path = (args or {}).get("file_path") or (args or {}).get("path") or ""
+                if name in ("read_file", "repo_search", "git_status"):
+                    reads += 1
+                    last_read.append(path)
+                    last_read = last_read[-3:]
+                    if len(last_read) == 3 and last_read[0] == last_read[1] == last_read[2] == path and path:
+                        return f"exploratory_spiral: read {path} 3x in a row"
+                elif name in ("write_file", "edit_file", "git_commit"):
+                    writes += 1
+                elif name == "run_command":
+                    shell += 1
+        if reads >= 6 and writes == 0:
+            return f"exploratory_spiral: {reads} reads, {shell} shell, 0 writes"
+        return None
+    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff", "exploratory_spiral")
     # Patterns inside the verifier reason or test output that signal the
     # failure cannot be solved by another attempt — research shows ~90% of
     # retry budget gets wasted on these. Bail to next feature instead of
@@ -509,6 +544,15 @@ async def run_once(
             # mode into a recoverable "tests maybe fail" one.
             _rescue_uncommitted_worktrees(feature)
             ok, reason = verify_changes(feature)
+            # Overlay stuck-state detection ONLY when verify fails — a
+            # spiral that still produced passing diff + tests is a success.
+            # This catches the "agent read 12 files, wrote nothing, still
+            # claimed done" pattern that burns retries on nothing.
+            if not ok:
+                spiral = _detect_exploratory_spiral(result.get("messages") or [])
+                if spiral:
+                    reason = f"{feature.repos[0] if feature.repos else 'feature'}: {spiral}"
+                    log.warning("exploratory_spiral_detected", feature=feature.id, reason=spiral)
             verdict = claimed if (claimed == "blocked" or ok) else "blocked"
             if verdict == "done":
                 break

@@ -221,9 +221,13 @@ class Backlog:
         )
         return candidates[0] if candidates else None
 
-    def set_status(self, feature_id: str, status: Status) -> None:
+    def set_status(self, feature_id: str, status: Status, reason: str = "", actor: str = "loop") -> None:
+        from .transitions import record_transition
         for f in self.features:
             if f.id == feature_id:
+                if f.status == status:
+                    return  # no-op, don't pollute the transition log
+                record_transition(feature_id, f.status, status, reason=reason, actor=actor)
                 f.status = status
                 self.save()
                 return
@@ -269,22 +273,26 @@ class Backlog:
         - ``nuke``:    drop the feature from the backlog. Irreversible. Used
           for debris features the agent will never productively resolve.
         """
+        from .transitions import record_transition
         for i, f in enumerate(self.features):
             if f.id != feature_id:
                 continue
             if action == "approve":
+                record_transition(feature_id, f.status, "done", reason="kanban approve", actor="kanban")
                 f.status = "done"
                 f.heal_hint = ""
                 f.heal_attempts = 0
                 self.save()
                 return True, f"{feature_id} -> done"
             if action == "retry":
+                record_transition(feature_id, f.status, "pending", reason="kanban retry", actor="kanban")
                 f.status = "pending"
                 f.heal_attempts = 0
                 f.heal_hint = ""
                 self.save()
                 return True, f"{feature_id} -> pending"
             if action == "nuke":
+                record_transition(feature_id, f.status, "nuked", reason="kanban nuke", actor="kanban")
                 self.features.pop(i)
                 self.save()
                 return True, f"{feature_id} removed"

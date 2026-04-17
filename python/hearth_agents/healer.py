@@ -122,6 +122,17 @@ def _hint_for_reason(reason: str) -> str:
             "PRIOR FAILURE: you committed locally but never pushed. End with a "
             "git push -u origin HEAD and verify with git ls-remote --heads origin."
         )
+    if "exploratory_spiral" in r:
+        return (
+            "PRIOR FAILURE: you spent the entire last session reading files "
+            "without writing anything. STOP the exploratory spiral. Rules "
+            "this attempt: (1) max 4 reads before your first write, (2) never "
+            "re-read the same file twice — trust your memory or diff, (3) if "
+            "after 4 reads you still can't write, the feature is blocked and "
+            "you should report 'BLOCKED: <concrete reason>' and exit. A "
+            "silent-abandoned session is the worst outcome; a written "
+            "BLOCKED message with a specific reason is a successful failure."
+        )
     return ""
 
 

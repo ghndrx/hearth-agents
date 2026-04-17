@@ -281,6 +281,28 @@ instead of improvising. The orchestrator will re-plan.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
 
+**Phase 4.5 — Self-critique BEFORE the final commit**
+
+Immediately before you call ``git_commit``, run ``git diff`` on the
+worktree and read every hunk you're about to ship. Then post a
+**SELF-REVIEW** block answering these questions in order:
+
+    SELF-REVIEW:
+    - What does the diff actually change? (one sentence per file)
+    - What's missing? (error handling, input validation, edge cases, tests)
+    - What could break existing behavior? (imports removed, signatures changed)
+    - Is there a test exercising the new behavior, not just the happy path?
+    - Would a reviewer approve this diff as-is?
+
+If any answer is "no" or "missing", DO NOT COMMIT YET — go back to
+``edit_file`` / ``write_file`` and address the gap, then re-run the
+self-review. You may iterate up to 3 times; if the 3rd self-review still
+surfaces gaps, ship what you have and report ``BLOCKED: <specific gap>``.
+
+This catches the "I forgot the test" / "I forgot error handling" class
+of failures in the same session rather than letting them fall out in
+the verifier step where they cost an entire fixup round.
+
 **Phase 5 — Affirmative completion + final commit**
 
 Before the final commit, you MUST post an explicit ACCEPTANCE statement:
