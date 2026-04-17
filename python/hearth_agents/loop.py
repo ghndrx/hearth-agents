@@ -64,15 +64,21 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
             # Scrub build-artifact / dep-cache paths before commit — otherwise
             # rescue can ship 400k-line node_modules diffs that immediately
             # fail the diff-size gate. Same pattern list as git_commit tool.
-            _BLOCKED = ("node_modules/", ".pnpm-store/", "dist/", "build/", "target/",
-                        ".next/", ".svelte-kit/", ".venv/", "__pycache__/",
-                        ".pytest_cache/", ".turbo/", "coverage/")
+            _BLOCKED_DIRS = ("node_modules/", ".pnpm-store/", "dist/", "build/", "target/",
+                             ".next/", ".svelte-kit/", ".venv/", "__pycache__/",
+                             ".pytest_cache/", ".turbo/", "coverage/")
+            # Lock files + debris files: observed 849k-line diffs dominated
+            # by pnpm-lock.yaml churn from the agent running pnpm install.
+            _BLOCKED_FILES = ("pnpm-lock.yaml", "package-lock.json", "yarn.lock",
+                              "Cargo.lock", "poetry.lock", "Gemfile.lock", "uv.lock",
+                              "dummy-push-trigger.txt", "dummy-trigger.txt",
+                              "push-trigger.txt")
             staged = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
                 cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
             ).stdout.splitlines()
             for p in staged:
-                if any(sig in p for sig in _BLOCKED):
+                if any(sig in p for sig in _BLOCKED_DIRS) or any(p.endswith(f) for f in _BLOCKED_FILES):
                     subprocess.run(["git", "rm", "--cached", "-r", "--", p],
                                    cwd=str(wt), timeout=10, check=False)
             commit = subprocess.run(

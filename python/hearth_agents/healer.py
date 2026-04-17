@@ -103,10 +103,19 @@ def _hint_for_reason(reason: str) -> str:
             "passes but catches nothing."
         )
     if "tests failed" in r:
+        # Extract the actual compiler/test error text so the next attempt has
+        # concrete guidance, not generic advice. verify_changes returns
+        # "hearth: tests failed: <actual error>" — grab the tail so the agent
+        # sees things like "dm.go:251:102: too many arguments" directly.
+        excerpt = reason.split("tests failed:", 1)[-1].strip()[:300] if "tests failed:" in reason else ""
+        detail = f" Failing output excerpt:\n  {excerpt}\n\n" if excerpt else " "
         return (
-            "PRIOR FAILURE: the test suite failed last attempt. Read the failing "
-            "test output FIRST (run_command the test command, parse the failure), "
-            "fix only what's broken, re-run the same test, then run the full suite."
+            "PRIOR FAILURE: the test suite (or compile step) failed last attempt."
+            + detail +
+            "Fix exactly these errors before re-running. Do NOT re-plan the "
+            "feature — the code is mostly right; just fix the specific errors "
+            "above. After fixing, run the test command and confirm exit=0 "
+            "BEFORE the final commit."
         )
     if "never pushed" in r:
         return (

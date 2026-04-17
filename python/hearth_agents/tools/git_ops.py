@@ -95,6 +95,7 @@ def git_status(repo_path: str) -> str:
     return f"{status}\n\ndiff vs {base}: {dout.strip()}{note}"
 
 
+# Dependency-cache / build-artifact DIRECTORIES (substring match).
 _BLOCKED_COMMIT_PATTERNS = (
     "node_modules/",
     ".pnpm-store/",
@@ -108,6 +109,29 @@ _BLOCKED_COMMIT_PATTERNS = (
     ".pytest_cache/",
     ".turbo/",
     "coverage/",
+)
+
+# Lock FILES are trickier: sometimes legitimately updated, but when the agent
+# just ran `pnpm install` they produce 50k-line noise that dominates diffs
+# and trips the size cap. Observed in prod: features with 849k-line diffs
+# where ~95% was lock-file churn. Scrubbing is the right default; if a
+# feature truly needs a dep bump, a planner note should explicitly say so.
+_BLOCKED_LOCK_FILES = (
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "Gemfile.lock",
+    "uv.lock",
+)
+
+# One-off hack files previous runs of the agent created (e.g. dummy-push-
+# trigger.txt) that should never land in production commits.
+_BLOCKED_DEBRIS_FILES = (
+    "dummy-push-trigger.txt",
+    "dummy-trigger.txt",
+    "push-trigger.txt",
 )
 
 
@@ -124,7 +148,13 @@ def _scrub_blocked_paths(repo_path: str) -> tuple[int, list[str]]:
     code, out = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, timeout=10)
     if code != 0:
         return 0, []
-    bad = [p for p in out.splitlines() if any(sig in p for sig in _BLOCKED_COMMIT_PATTERNS)]
+    paths = out.splitlines()
+    bad = [
+        p for p in paths
+        if any(sig in p for sig in _BLOCKED_COMMIT_PATTERNS)
+        or any(p.endswith(lock) for lock in _BLOCKED_LOCK_FILES)
+        or any(p.endswith(debris) for debris in _BLOCKED_DEBRIS_FILES)
+    ]
     if not bad:
         return 0, []
     # git rm --cached -r -- <path> preserves the worktree file but unstages it
