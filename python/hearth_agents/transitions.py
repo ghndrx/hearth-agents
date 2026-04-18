@@ -108,25 +108,70 @@ def record_transition(
     except OSError as e:
         log.warning("transition_log_write_failed", err=str(e)[:200], feature=feature_id)
 
-    # Fan out to the outbound webhook (if configured). Fire-and-forget;
-    # a slow or failing subscriber can't wedge the loop. Import lazily to
-    # keep transitions.py free of config + httpx during tests.
+    # Fan out to the outbound webhook with at-least-once delivery via a
+    # small in-memory retry queue. A dropped subscriber doesn't lose
+    # events across the process lifetime (process restart still loses
+    # the queue; for durable delivery, the subscriber should persist).
     try:
         from .config import settings
         if settings.outbound_transition_webhook_url:
-            import asyncio
-            import httpx
-            async def _post() -> None:
-                try:
-                    async with httpx.AsyncClient(timeout=5) as c:
-                        await c.post(settings.outbound_transition_webhook_url, json=entry)
-                except httpx.HTTPError as e:
-                    log.warning("outbound_webhook_failed", err=str(e)[:160])
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_post())
-            except RuntimeError:
-                # No running loop (e.g. tests); swallow.
-                pass
+            _enqueue_outbound_webhook(entry)
     except Exception:  # noqa: BLE001
         pass
+
+
+# Outbound-webhook retry queue. In-memory; lost on restart. Background
+# pump delivers with exponential backoff up to _MAX_ATTEMPTS.
+_outbound_queue: list[tuple[int, dict]] = []  # (attempt_count, entry)
+_outbound_lock_started = False
+_MAX_ATTEMPTS = 5
+
+
+def _enqueue_outbound_webhook(entry: dict) -> None:
+    _outbound_queue.append((0, dict(entry)))
+    # Lazily spawn the pump on first enqueue.
+    global _outbound_lock_started
+    if _outbound_lock_started:
+        return
+    try:
+        import asyncio
+        asyncio.get_running_loop().create_task(_outbound_pump())
+        _outbound_lock_started = True
+    except RuntimeError:
+        pass
+
+
+async def _outbound_pump() -> None:
+    """Drain the retry queue with backoff. One pump task per process."""
+    import asyncio
+    import httpx
+    from .config import settings
+    while True:
+        if not _outbound_queue:
+            await asyncio.sleep(5)
+            continue
+        attempts, entry = _outbound_queue.pop(0)
+        url = settings.outbound_transition_webhook_url
+        if not url:
+            continue  # config flipped off; drop silently
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(url, json=entry)
+            if 200 <= r.status_code < 300:
+                continue  # delivered
+            raise httpx.HTTPError(f"HTTP {r.status_code}")
+        except httpx.HTTPError as e:
+            next_attempt = attempts + 1
+            if next_attempt >= _MAX_ATTEMPTS:
+                log.warning(
+                    "outbound_webhook_dropped",
+                    feature=entry.get("feature_id"),
+                    attempts=next_attempt,
+                    err=str(e)[:160],
+                )
+                continue
+            # Exponential backoff: 5s, 10s, 20s, 40s.
+            delay = 5 * (2 ** attempts)
+            log.info("outbound_webhook_retry", attempts=next_attempt, delay_sec=delay)
+            await asyncio.sleep(delay)
+            _outbound_queue.append((next_attempt, entry))

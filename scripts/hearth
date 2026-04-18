@@ -161,6 +161,60 @@ def cmd_tail(args: list[str]) -> None:
         print(f"  {t.get('ts')} {t.get('feature_id','?'):40s} {t.get('from','-')} → {t.get('to')} [{t.get('actor','?')}]")
 
 
+def cmd_deploy(args: list[str]) -> None:
+    """Safe deploy: git pull → build (captured) → up → verify /health.
+    On build failure OR post-swap /health degraded, surface clearly
+    instead of returning green. Requires SSH to gateway-01 configured
+    via HEARTH_SSH_HOST (default administrator@gateway-01)."""
+    import subprocess
+    host = os.environ.get("HEARTH_SSH_HOST", "administrator@gateway-01")
+    remote_dir = os.environ.get("HEARTH_REMOTE_DIR", "/opt/hearth-agents")
+    ssh_key = os.environ.get("HEARTH_SSH_KEY", os.path.expanduser("~/.ssh/macaroni"))
+    ssh_cmd = ["ssh", "-i", ssh_key, host]
+
+    def _ssh(cmdline: str, timeout: int = 300) -> tuple[int, str]:
+        r = subprocess.run(
+            ssh_cmd + [cmdline], capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+        return r.returncode, (r.stdout + r.stderr)
+
+    print("=> pulling")
+    rc, out = _ssh(f"cd {remote_dir} && git pull --ff-only origin main")
+    if rc != 0:
+        print(f"pull failed ({rc}):\n{out[-1000:]}", file=sys.stderr); sys.exit(1)
+    print(out.strip().split("\n")[-1])
+
+    print("=> building (this can take a few minutes)")
+    rc, out = _ssh(f"cd {remote_dir} && docker compose build agent", timeout=900)
+    if rc != 0 or "failed to solve" in out or "ERROR" in out:
+        err = "\n".join(line for line in out.splitlines() if any(s in line for s in ("ERROR", "failed", "error:")))
+        print(f"build failed:\n{err[-2000:]}", file=sys.stderr); sys.exit(2)
+    print("build ok")
+
+    print("=> swapping container")
+    rc, out = _ssh(f"cd {remote_dir} && docker compose up -d agent")
+    if rc != 0:
+        print(f"swap failed ({rc}):\n{out[-1000:]}", file=sys.stderr); sys.exit(3)
+
+    print("=> waiting for /health")
+    import time
+    for i in range(24):  # 2-minute window
+        time.sleep(5)
+        try:
+            h = _req("GET", "/health")
+            if h.get("status") == "ok":
+                print(f"✓ deploy complete — status=ok, stats={h.get('stats')}")
+                return
+            print(f"  … waiting (status={h.get('status','?')})")
+        except SystemExit:
+            pass
+        except Exception as e:
+            print(f"  … waiting ({e})")
+    print("deploy didn't reach status=ok within 2m — check /health manually", file=sys.stderr)
+    sys.exit(4)
+
+
 COMMANDS = {
     "status": cmd_status, "features": cmd_features, "show": cmd_show,
     "queue": cmd_queue, "bug": cmd_bug,
@@ -169,6 +223,7 @@ COMMANDS = {
     "nuke": lambda a: cmd_action("nuke", a),
     "debate": cmd_debate, "cost": cmd_cost,
     "who": cmd_who, "health": cmd_health, "dep": cmd_dep, "tail": cmd_tail,
+    "deploy": cmd_deploy,
 }
 
 

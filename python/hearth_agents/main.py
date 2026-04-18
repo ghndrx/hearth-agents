@@ -19,6 +19,7 @@ from .config import settings
 from .archive_task import run_archive
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
+from .research_watch import run_research_watch
 from .scheduler import run_scheduler
 from .self_improvement_seeder import run_self_improvement_seeder
 from .snapshot_task import run_snapshot
@@ -67,6 +68,7 @@ async def _main() -> None:
         "stuck_feature_escalator": lambda: run_stuck_feature_escalator(backlog),
         "self_improvement_seeder": lambda: run_self_improvement_seeder(backlog),
         "snapshot": lambda: run_snapshot(backlog),
+        "research_watch": lambda: run_research_watch(),
     }
     bg_tasks: dict[str, tuple[asyncio.Task, Any]] = {}
     for name, factory in factories.items():

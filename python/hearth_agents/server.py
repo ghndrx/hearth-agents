@@ -365,6 +365,55 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         except _json.JSONDecodeError:
             return {"raw": True, "text": result[:4000]}
 
+    @app.post("/backlog/repair")
+    async def backlog_repair(payload: dict[str, Any]) -> dict[str, Any]:
+        """Sync live state to match /backlog/replay projection.
+        Destructive — use only when /backlog/replay reports drift that
+        you want to heal. Body: {"dry_run": true|false}.
+
+        In dry_run mode, returns the set of mutations that WOULD run
+        without performing them. Honestly-run mode applies:
+          - for each status_mismatch: Backlog.set_status(id, projection)
+          - for each missing_in_projection id: remove from backlog
+        Doesn't heal ``missing_in_live`` (that'd need re-hydrating an
+        entire Feature row from transition data, which doesn't carry
+        full Feature fields)."""
+        from .transitions import read_tail
+        projection: dict[str, str] = {}
+        for t in read_tail(limit=100000):
+            fid = t.get("feature_id") or ""
+            to = t.get("to") or ""
+            if not fid or not to:
+                continue
+            if to == "nuked":
+                projection.pop(fid, None)
+            else:
+                projection[fid] = to
+        live: dict[str, str] = {f.id: f.status for f in backlog.features}
+        mismatches = [fid for fid in projection if fid in live and live[fid] != projection[fid]]
+        missing_in_projection = [fid for fid in live if fid not in projection]
+        dry_run = bool(payload.get("dry_run", False))
+        if dry_run:
+            return {
+                "dry_run": True,
+                "would_fix_status": [
+                    {"id": fid, "live": live[fid], "projection": projection[fid]}
+                    for fid in mismatches
+                ],
+                "would_remove": missing_in_projection,
+            }
+        fixed = 0
+        for fid in mismatches:
+            backlog.set_status(fid, projection[fid], reason="repair_to_projection", actor="webhook")  # type: ignore[arg-type]
+            fixed += 1
+        removed = 0
+        for fid in missing_in_projection:
+            ok, _ = backlog.action(fid, "nuke")
+            if ok:
+                removed += 1
+        log.info("backlog_repaired", status_fixed=fixed, removed=removed)
+        return {"dry_run": False, "status_fixed": fixed, "removed": removed}
+
     @app.get("/backlog/replay")
     async def backlog_replay() -> dict[str, Any]:
         """Rebuild Backlog state as a projection from transitions.jsonl.

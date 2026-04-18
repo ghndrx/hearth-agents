@@ -34,6 +34,7 @@ _intervals: dict[str, int] = {
     "snapshot": 86400,
     "watchdog": 60,
     "autoscaler": 60,
+    "research_watch": 1800,
 }
 
 
