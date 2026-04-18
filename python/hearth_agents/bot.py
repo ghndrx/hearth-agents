@@ -172,6 +172,73 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             lines.append(f"  w{wid}: {info['feature']} ({info['age_sec']}s ago)")
         await msg.answer("\n".join(lines))
 
+    @dp.message(Command("schedule"))
+    async def _schedule(msg: Message) -> None:
+        """Preview upcoming scheduled firings."""
+        import json as _json
+        from pathlib import Path as _P
+        path = _P("/data/schedule.json")
+        if not path.exists():
+            await msg.answer("No schedule configured. Set up via /kanban → schedule button.")
+            return
+        try:
+            entries = _json.loads(path.read_text())
+        except Exception:
+            await msg.answer("Schedule file unreadable.")
+            return
+        if not entries:
+            await msg.answer("Schedule is empty.")
+            return
+        import time as _t
+        now = _t.time()
+        lines = ["Scheduled features:"]
+        for e in entries if isinstance(entries, list) else []:
+            every = float(e.get("every_hours") or 0)
+            last = float(e.get("last_fire_ts") or 0)
+            next_fire = last + every * 3600 if last > 0 else now
+            fires_in_h = max(0.0, (next_fire - now) / 3600)
+            lines.append(f"  {e.get('name','?')}: every {every}h, next in {fires_in_h:.1f}h")
+        await msg.answer("\n".join(lines))
+
+    @dp.message(Command("deps"))
+    async def _deps(msg: Message, command: CommandObject) -> None:
+        """Show dependency state — a specific feature's deps OR a
+        summary of features currently blocked by unfinished deps."""
+        fid = (command.args or "").strip()
+        if fid:
+            f = next((x for x in backlog.features if x.id == fid), None)
+            if f is None:
+                await msg.answer(f"Feature {fid} not found.")
+                return
+            if not f.depends_on:
+                await msg.answer(f"{fid} has no declared dependencies.")
+                return
+            lines = [f"Deps for {fid}:"]
+            for dep in f.depends_on:
+                dep_feat = next((x for x in backlog.features if x.id == dep), None)
+                if dep_feat is None:
+                    lines.append(f"  {dep}: (not in backlog)")
+                else:
+                    mark = "✅" if dep_feat.status == "done" else "⏳"
+                    lines.append(f"  {mark} {dep}: {dep_feat.status}")
+            await msg.answer("\n".join(lines))
+            return
+        # Summary mode.
+        blocked_by_deps = []
+        for f in backlog.features:
+            if not f.depends_on or f.status != "pending":
+                continue
+            unfinished = [d for d in f.depends_on if not any(g.id == d and g.status == "done" for g in backlog.features)]
+            if unfinished:
+                blocked_by_deps.append((f.id, unfinished))
+        if not blocked_by_deps:
+            await msg.answer("No pending features are blocked by deps.")
+            return
+        lines = [f"{len(blocked_by_deps)} features blocked by deps:"]
+        for fid, unfin in blocked_by_deps[:10]:
+            lines.append(f"  {fid} waits for: {', '.join(unfin)}")
+        await msg.answer("\n".join(lines))
+
     @dp.message(Command("debate"))
     async def _debate(msg: Message, command: CommandObject) -> None:
         fid = (command.args or "").strip()

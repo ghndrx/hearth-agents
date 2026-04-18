@@ -312,6 +312,55 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from dataclasses import asdict
         return [asdict(f) for f in backlog.features]
 
+    @app.get("/backlog/diff")
+    async def backlog_diff(from_date: str, to_date: str) -> dict[str, Any]:
+        """Diff two daily snapshots from /data/backlog-snapshots/.
+        Reports features ADDED (in 'to' not 'from'), REMOVED (in 'from'
+        not 'to'), and STATUS_CHANGED (id present in both, status
+        differs). Use to answer 'what moved overnight?' or
+        'what regressed since the last good snapshot?'.
+
+        Date format: YYYY-MM-DD. ``from_date`` < ``to_date`` enforced
+        only via filename ordering — the underlying files are read
+        as-is."""
+        import json as _json
+        from pathlib import Path as _P
+        snap_dir = _P("/data/backlog-snapshots")
+        from_path = snap_dir / f"{from_date}.json"
+        to_path = snap_dir / f"{to_date}.json"
+        if not from_path.exists():
+            raise HTTPException(status_code=404, detail=f"snapshot not found: {from_date}")
+        if not to_path.exists():
+            raise HTTPException(status_code=404, detail=f"snapshot not found: {to_date}")
+        try:
+            from_features = {f["id"]: f for f in _json.loads(from_path.read_text())}
+            to_features = {f["id"]: f for f in _json.loads(to_path.read_text())}
+        except (OSError, _json.JSONDecodeError, KeyError) as e:
+            raise HTTPException(status_code=500, detail=f"snapshot parse failed: {e}")
+        added = [{"id": fid, "name": f.get("name"), "status": f.get("status")} for fid, f in to_features.items() if fid not in from_features]
+        removed = [{"id": fid, "name": f.get("name"), "status": f.get("status")} for fid, f in from_features.items() if fid not in to_features]
+        status_changed: list[dict[str, Any]] = []
+        for fid, f_to in to_features.items():
+            if fid not in from_features:
+                continue
+            if from_features[fid].get("status") != f_to.get("status"):
+                status_changed.append({
+                    "id": fid,
+                    "name": f_to.get("name"),
+                    "from": from_features[fid].get("status"),
+                    "to": f_to.get("status"),
+                })
+        return {
+            "from_date": from_date,
+            "to_date": to_date,
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "status_changed_count": len(status_changed),
+            "added": added,
+            "removed": removed,
+            "status_changed": status_changed,
+        }
+
     @app.post("/backlog/import")
     async def backlog_import(payload: dict[str, Any]) -> dict[str, Any]:
         """Merge an exported backlog into the live one. Body:

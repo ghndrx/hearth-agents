@@ -107,3 +107,26 @@ def record_transition(
             f.write(json.dumps(entry) + "\n")
     except OSError as e:
         log.warning("transition_log_write_failed", err=str(e)[:200], feature=feature_id)
+
+    # Fan out to the outbound webhook (if configured). Fire-and-forget;
+    # a slow or failing subscriber can't wedge the loop. Import lazily to
+    # keep transitions.py free of config + httpx during tests.
+    try:
+        from .config import settings
+        if settings.outbound_transition_webhook_url:
+            import asyncio
+            import httpx
+            async def _post() -> None:
+                try:
+                    async with httpx.AsyncClient(timeout=5) as c:
+                        await c.post(settings.outbound_transition_webhook_url, json=entry)
+                except httpx.HTTPError as e:
+                    log.warning("outbound_webhook_failed", err=str(e)[:160])
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_post())
+            except RuntimeError:
+                # No running loop (e.g. tests); swallow.
+                pass
+    except Exception:  # noqa: BLE001
+        pass

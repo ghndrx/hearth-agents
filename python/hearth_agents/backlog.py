@@ -81,6 +81,11 @@ class Feature:
     # is schedulable. Lets multi-step projects queue coherently without a
     # human sequencer. next_pending() respects this.
     depends_on: list[str] = field(default_factory=list)
+    # Optional per-feature budget override in USD. When > 0, takes precedence
+    # over settings.per_feature_budget_usd in the loop's per-feature cost
+    # check. Use for features known to be expensive (Matrix federation,
+    # cross-repo refactors) that shouldn't trip the default budget cap.
+    budget_usd: float = 0.0
 
     def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived

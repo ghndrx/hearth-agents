@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     # Notifier.send().
     slack_webhook_url: str = ""
     discord_webhook_url: str = ""
+    # Outbound webhook fired on every feature transition. The POST body
+    # is the transition JSON (feature_id, from, to, reason, actor,
+    # prompts_version, ts). Use to pipe into an external dashboard,
+    # ticketing system, or audit log. Empty = disabled.
+    outbound_transition_webhook_url: str = ""
 
     # GitHub
     github_token: str = ""

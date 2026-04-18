@@ -840,28 +840,32 @@ commit on approval. Skip PR creation if implementation produced zero file change
 {memory_prefix}{conventions_block}"""
 
 
-async def _claim_next(backlog: Backlog) -> Feature | None:
+async def _claim_next(backlog: Backlog, worker_id: int = 0) -> Feature | None:
     """Atomically pick the next pending feature and mark it implementing.
 
-    Holds ``_CLAIM_LOCK`` across the read+write so two concurrent workers can
-    never grab the same feature. Also skips self-improvement features when one
-    is already running — prompts.py is a shared file and parallel edits fight.
+    Worker-affinity rule: self-improvement features (which all touch
+    prompts.py) are pinned to worker 0. Other workers ignore them
+    entirely. Combined with the existing _self_improv_active counter
+    this gives belt-and-suspenders safety against parallel edits to
+    the shared prompts.py file.
 
-    Before returning, runs the splitter: any candidate targeting multiple repos
-    is replaced with per-repo children and we re-select. Prevents the "one
-    attempt implements everything across 3 repos and blows through the diff
-    cap" failure mode (data-export-portability = 2649 lines, message-threading
-    = 443,603 lines).
+    Holds ``_CLAIM_LOCK`` across the read+write so two concurrent workers
+    can never grab the same feature.
+
+    Before returning, runs the splitter: any candidate targeting multiple
+    repos is replaced with per-repo children and we re-select. Prevents
+    the "one attempt implements everything across 3 repos and blows
+    through the diff cap" failure mode.
     """
     from .splitter import maybe_split
 
     global _self_improv_active
     async with _CLAIM_LOCK:
-        # Split loop: keep re-selecting until we get a candidate that doesn't
-        # need splitting, or we run out of candidates. Bounded by backlog size
-        # so a pathological state can't spin.
         for _ in range(len(backlog.features) + 1):
             candidates = [f for f in backlog.features if f.status == "pending"]
+            # Worker-affinity: only worker 0 picks up self-improvement work.
+            if worker_id != 0:
+                candidates = [f for f in candidates if not f.self_improvement]
             if _self_improv_active > 0:
                 candidates = [f for f in candidates if not f.self_improvement]
             if not candidates:
@@ -901,7 +905,7 @@ async def run_once(
     to set if a 429 fires — without it we couldn't tell whether the failure
     came from primary (Kimi) or fallback (MiniMax) and we'd ping-pong.
     """
-    feature = await _claim_next(backlog)
+    feature = await _claim_next(backlog, worker_id=worker_id)
     if feature is None:
         log.debug("loop_idle", reason="no_pending_features")
         return False
@@ -1053,15 +1057,22 @@ async def run_once(
             # recover; we already bail on unsolvable signals, now we
             # also bail on cost alone).
             running_cost = _add_feature_tokens(feature.id, in_tok, out_tok)
-            if settings.per_feature_budget_usd > 0 and running_cost >= settings.per_feature_budget_usd:
+            # Per-feature override beats the global default; falls through
+            # to settings.per_feature_budget_usd otherwise.
+            effective_budget = (
+                feature.budget_usd if getattr(feature, "budget_usd", 0.0) > 0
+                else settings.per_feature_budget_usd
+            )
+            if effective_budget > 0 and running_cost >= effective_budget:
                 log.warning(
                     "feature_budget_exhausted",
                     id=feature.id,
                     spent_usd=round(running_cost, 3),
-                    budget_usd=settings.per_feature_budget_usd,
+                    budget_usd=effective_budget,
+                    override=getattr(feature, "budget_usd", 0.0) > 0,
                     attempt=attempt,
                 )
-                reason = f"budget_exhausted: spent ${running_cost:.3f} of ${settings.per_feature_budget_usd:.2f}"
+                reason = f"budget_exhausted: spent ${running_cost:.3f} of ${effective_budget:.2f}"
                 verdict = "blocked"
                 break
             # Persist this attempt's tool-call fingerprint log so future
