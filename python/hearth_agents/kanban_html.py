@@ -90,10 +90,27 @@ KANBAN_HTML = r"""<!doctype html>
     <div class="bulk">
       <input type="search" placeholder="filter id / name / repo..." x-model="filterText" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:12px;width:220px;" />
       <span class="meta" x-text="'refreshed ' + sinceLabel + 's ago'"></span>
+      <select x-model="kindFilter" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);padding:4px;font-size:12px;">
+        <option value="">all kinds</option>
+        <option value="feature">feature</option>
+        <option value="bug">bug</option>
+        <option value="refactor">refactor</option>
+        <option value="schema">schema</option>
+        <option value="security">security</option>
+        <option value="incident">incident</option>
+        <option value="perf-revert">perf-revert</option>
+      </select>
+      <select x-model="riskFilter" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);padding:4px;font-size:12px;">
+        <option value="">all risk</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+      </select>
       <button @click="refresh()">refresh</button>
       <button @click="openAddModal()" style="background: var(--done); color: #fff; border-color: var(--done);">+ add</button>
       <button @click="loadAnalytics()">analytics</button>
-      <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve all blocked</button>
+      <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve blocked</button>
+      <button :disabled="!escalatedFeatures.length" @click="bulkRetryEscalated()" title="Reset heal_attempts and re-queue every escalated feature">retry escalated</button>
     </div>
   </header>
 
@@ -268,6 +285,8 @@ function kanban() {
     analytics: null,
     addForm: null,
     filterText: '',
+    kindFilter: '',
+    riskFilter: '',
     toast: '',
     toastErr: false,
     lastRefresh: Date.now(),
@@ -282,6 +301,7 @@ function kanban() {
       { key: 'done',         label: 'Done',         color: 'var(--done)',    match: ['done'], escalated: false },
     ],
     get blockedFeatures() { return this.features.filter(f => f.status === 'blocked'); },
+    get escalatedFeatures() { return this.features.filter(f => f.status === 'blocked' && (f.heal_attempts || 0) >= 3); },
     init() {
       this.refresh();
       setInterval(() => this.refresh(), 10000);
@@ -387,6 +407,8 @@ function kanban() {
       let base = this.features.filter(f => col.match.includes(f.status));
       if (col.key === 'blocked') base = base.filter(f => (f.heal_attempts || 0) < 3);
       if (col.key === 'escalated') base = base.filter(f => (f.heal_attempts || 0) >= 3);
+      if (this.kindFilter) base = base.filter(f => f.kind === this.kindFilter);
+      if (this.riskFilter) base = base.filter(f => (f.risk_tier || 'low') === this.riskFilter);
       const q = this.filterText.trim().toLowerCase();
       if (!q) return base;
       return base.filter(f =>
@@ -418,6 +440,15 @@ function kanban() {
         await this.act(id, 'approve');
       }
       this.flash('approved ' + ids.length + ' features');
+    },
+    async bulkRetryEscalated() {
+      const ids = this.escalatedFeatures.map(f => f.id);
+      if (!ids.length) return;
+      if (!confirm('Reset heal_attempts and re-queue ' + ids.length + ' escalated feature(s)?')) return;
+      for (const id of ids) {
+        await this.act(id, 'retry');
+      }
+      this.flash('retried ' + ids.length + ' escalated features');
     },
     confirmNuke(f) {
       if (!confirm('Nuke ' + f.id + ' (' + f.name + ')? This removes it from the backlog.')) return;

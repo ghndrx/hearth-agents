@@ -294,6 +294,52 @@ class Backlog:
         counts["total"] = len(self.features)
         return counts
 
+    def archive_old_done(self, max_age_days: int = 7) -> int:
+        """Move done features older than ``max_age_days`` into a sibling
+        archive file alongside backlog.json. Keeps the live backlog +
+        every /features payload responsive as the project ages.
+
+        Self-improvement features and features with parent_id (split
+        children) are kept regardless — they're cross-referenced by
+        other parts of the system.
+        """
+        if not self._path:
+            return 0
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        keep: list[Feature] = []
+        archive_now: list[Feature] = []
+        for f in self.features:
+            if f.status != "done":
+                keep.append(f)
+                continue
+            if f.self_improvement or f.parent_id:
+                keep.append(f)
+                continue
+            try:
+                created = datetime.fromisoformat(f.created_at.replace("Z", "+00:00"))
+            except ValueError:
+                keep.append(f)
+                continue
+            if created < cutoff:
+                archive_now.append(f)
+            else:
+                keep.append(f)
+        if not archive_now:
+            return 0
+        archive_path = self._path.with_name("archive.json")
+        existing: list[dict] = []
+        if archive_path.exists():
+            try:
+                existing = json.loads(archive_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                existing = []
+        existing.extend(asdict(f) for f in archive_now)
+        archive_path.write_text(json.dumps(existing, indent=2))
+        self.features = keep
+        self.save()
+        return len(archive_now)
+
     def action(self, feature_id: str, action: str) -> tuple[bool, str]:
         """Apply a kanban action to a feature. Returns (success, message).
 

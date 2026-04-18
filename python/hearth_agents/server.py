@@ -405,6 +405,50 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 await agent.ainvoke(
                     {"messages": [{"role": "user", "content": structured["prompt"]}]}
                 )
+        elif event == "issues":
+            # GitHub Issues → bug auto-ingest. When a new issue lands on
+            # one of our repos, normalize it into a Feature.kind=bug and
+            # let the loop pick it up. Only on action="opened" so we
+            # don't spam features on every label change.
+            if (payload.get("action") or "") == "opened":
+                from .backlog import Feature
+                from .sanitize import sanitize as _sanitize
+                issue = payload.get("issue") or {}
+                title = (issue.get("title") or "").strip()
+                body = (issue.get("body") or "").strip()
+                number = issue.get("number") or 0
+                repo_full = (payload.get("repository") or {}).get("full_name", "")
+                repo_short = repo_full.split("/")[-1] if "/" in repo_full else "hearth"
+                if title:
+                    sres = _sanitize(body or title, provenance=f"github_issue:{repo_full}#{number}", max_len=4000)
+                    if not sres.rejected:
+                        # Treat issues with /repro: in the body or title as bugs;
+                        # everything else stays as a "feature" (enhancement request).
+                        is_bug = "/repro:" in body.lower() or "[bug]" in title.lower() or any(
+                            (l.get("name") or "").lower() == "bug" for l in (issue.get("labels") or [])
+                        )
+                        kind = "bug" if is_bug else "feature"
+                        repro = ""
+                        if is_bug and "/repro:" in body.lower():
+                            # Pull the line after /repro: as the repro_command.
+                            for line in body.splitlines():
+                                if line.lower().startswith("/repro:"):
+                                    repro = line.split(":", 1)[1].strip()
+                                    break
+                            if not repro:
+                                repro = "(see issue body)"
+                        feature_id = f"gh-{repo_short}-{number}"[:60]
+                        feature = Feature(
+                            id=feature_id,
+                            name=title[:200],
+                            description=sres.safe_text,
+                            priority="high" if is_bug else "medium",
+                            repos=[repo_short],  # type: ignore[list-item]
+                            kind=kind,  # type: ignore[arg-type]
+                            repro_command=repro[:200] if is_bug else "",
+                        )
+                        added = backlog.add(feature)
+                        log.info("github_issue_ingested", feature_id=feature_id, added=added, kind=kind)
         elif event == "pull_request":
             # Conventional-commits gate (research #3834). Flag PRs whose
             # title doesn't parse as a conventional-commit header so the

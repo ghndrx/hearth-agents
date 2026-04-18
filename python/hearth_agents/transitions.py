@@ -25,15 +25,29 @@ _DEFAULT_PATH = Path(os.environ.get("TRANSITIONS_PATH", "/data/transitions.jsonl
 
 @lru_cache(maxsize=1)
 def prompts_version() -> str:
-    """Short sha of prompts.py at import time. Stamped into every transition
-    so operators can attribute block-rate deltas to prompt changes. Cached
-    per-process — a restart rolls to the new hash, which is exactly the
-    boundary we care about."""
-    try:
-        src = Path(__file__).with_name("prompts.py").read_bytes()
-        return hashlib.sha256(src).hexdigest()[:10]
-    except OSError:
+    """Combined sha of every file containing prompt content the agent
+    actually sees: prompts.py (orchestrator/subagent text) + loop.py
+    (per-feature prompt builder, fixup prompts, breaking-change prompt).
+    Cached per-process — a restart rolls to the new hash, which is the
+    boundary we care about for A/B attribution.
+
+    Earlier versions only hashed prompts.py, missing loop.py edits that
+    reshape the agent's actual input. This wider hash makes
+    /prompt-analytics's done-rate attribution honest."""
+    sources: list[bytes] = []
+    here = Path(__file__).parent
+    for name in ("prompts.py", "loop.py"):
+        try:
+            sources.append(here.joinpath(name).read_bytes())
+        except OSError:
+            sources.append(b"")
+    if not any(sources):
         return "unknown"
+    h = hashlib.sha256()
+    for s in sources:
+        h.update(s)
+        h.update(b"\x1e")  # separator so concatenation is unambiguous
+    return h.hexdigest()[:10]
 
 
 def read_tail(limit: int = 500, feature_id: str | None = None) -> list[dict]:

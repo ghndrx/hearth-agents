@@ -1423,6 +1423,43 @@ async def _worker(
         await asyncio.sleep(LOOP_INTERVAL_SEC if did_work else 60)
 
 
+def _auto_rerun_on_new_prompts(backlog: Backlog) -> int:
+    """When prompts_version differs from the version recorded against
+    each escalated/blocked feature's last terminal transition, flip
+    those features back to pending so the new prompts get a swing at
+    them. Idempotent — only flips when transition history actually
+    shows an older version. Returns the count flipped."""
+    from .transitions import prompts_version, read_tail
+    current = prompts_version()
+    last_version_per_feature: dict[str, str] = {}
+    for t in read_tail(limit=20000):
+        v = t.get("prompts_version") or ""
+        fid = t.get("feature_id") or ""
+        if not (fid and v):
+            continue
+        last_version_per_feature[fid] = v  # chronological, last wins
+    flipped = 0
+    for f in backlog.features:
+        if f.status != "blocked":
+            continue
+        last_v = last_version_per_feature.get(f.id, "")
+        if not last_v or last_v == current:
+            continue
+        # Reset heal_attempts so the loop / healer can re-pick. Keep the
+        # heal_hint so the new prompts inherit the prior failure context.
+        f.heal_attempts = 0
+        backlog.set_status(
+            f.id, "pending",
+            reason=f"auto_rerun_on_prompts_change {last_v}->{current}",
+            actor="loop",
+        )
+        flipped += 1
+    if flipped:
+        backlog.save()
+        log.info("auto_rerun_flipped", count=flipped, current_version=current)
+    return flipped
+
+
 async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None = None) -> None:
     """Main loop. Runs until cancelled. Shares state with the HTTP server and bot.
 
@@ -1433,6 +1470,18 @@ async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None =
     log.info("loop_started", interval_sec=LOOP_INTERVAL_SEC, workers=n, stats=backlog.stats())
     notifier = Notifier()
     await notifier.send(f"🔥 hearth-agents loop started — workers={n} {backlog.stats()}")
+
+    # Auto-rerun blocked features that were blocked under an OLD
+    # prompts_version. Cheap to do at boot — just one transition-log
+    # walk + a few set_status calls. No effect when prompts haven't
+    # changed since last boot. Closes the gap where shipping a new
+    # prompt didn't auto-revisit prior failures.
+    try:
+        flipped = _auto_rerun_on_new_prompts(backlog)
+        if flipped:
+            await notifier.send(f"♻️ auto-rerun: {flipped} blocked features flipped to pending on prompts version change")
+    except Exception as e:  # noqa: BLE001
+        log.warning("auto_rerun_failed", err=str(e)[:200])
 
     try:
         await asyncio.gather(

@@ -15,6 +15,7 @@ from .agent import build_agent, build_fallback_agent
 from .backlog import Backlog
 from .bot import run_bot
 from .config import settings
+from .archive_task import run_archive
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
 from .gc_worktrees import run_worktree_gc
@@ -53,6 +54,7 @@ async def _main() -> None:
         run_worktree_gc(backlog),
         run_digest(backlog),
         run_drift_alarm(),
+        run_archive(backlog),
     )
 
 
