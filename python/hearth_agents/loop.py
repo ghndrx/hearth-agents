@@ -142,18 +142,27 @@ CIRCUIT_MIN_SAMPLES = 5            # don't trip on tiny samples
 CIRCUIT_BLOCK_THRESHOLD = 0.70     # >70% blocked in window → trip
 CIRCUIT_COOLDOWN_SEC = 30 * 60     # pause this long before resuming
 
-# Sliding-window log of (wall_time, verdict) for circuit eval. Trimmed in place.
+# Sliding-window logs of (wall_time, verdict) for circuit eval. Trimmed in
+# place. Per-provider logs let us open the breaker on ONE provider without
+# idling the whole loop — e.g. Kimi's tool-calling regresses, MiniMax is
+# fine, so pause Kimi and route everything through MiniMax for 30m.
 _verdict_log: list[tuple[float, str]] = []
+_verdict_log_by_provider: dict[str, list[tuple[float, str]]] = {"primary": [], "fallback": []}
 _circuit_open_until: float = 0.0
+_circuit_open_until_by_provider: dict[str, float] = {"primary": 0.0, "fallback": 0.0}
 
 
-def _record_verdict(verdict: str) -> None:
+def _record_verdict(verdict: str, provider: str = "primary") -> None:
     import time as _t
     now = _t.time()
     _verdict_log.append((now, verdict))
     cutoff = now - CIRCUIT_WINDOW_SEC
     while _verdict_log and _verdict_log[0][0] < cutoff:
         _verdict_log.pop(0)
+    plog = _verdict_log_by_provider.setdefault(provider, [])
+    plog.append((now, verdict))
+    while plog and plog[0][0] < cutoff:
+        plog.pop(0)
 
 
 def _check_circuit_breaker() -> bool:
@@ -199,18 +208,61 @@ def _check_circuit_breaker() -> bool:
     return False
 
 
+def _check_provider_circuit(provider: str) -> bool:
+    """Per-provider circuit breaker. Returns True when the provider's
+    block rate alone has tripped — caller should route around this
+    provider. Trips independently of the global breaker so we can
+    quarantine one model without pausing the loop."""
+    import time as _t
+    now = _t.time()
+    if _circuit_open_until_by_provider.get(provider, 0.0) > now:
+        return True
+    plog = _verdict_log_by_provider.get(provider, [])
+    if len(plog) < CIRCUIT_MIN_SAMPLES:
+        return False
+    blocked = sum(1 for _, v in plog if v == "blocked")
+    rate = blocked / len(plog)
+    if rate >= CIRCUIT_BLOCK_THRESHOLD:
+        _circuit_open_until_by_provider[provider] = now + CIRCUIT_COOLDOWN_SEC
+        samples = len(plog)
+        plog.clear()
+        log.warning(
+            "provider_circuit_tripped",
+            provider=provider,
+            block_rate=round(rate, 2),
+            samples=samples,
+            cooldown_sec=CIRCUIT_COOLDOWN_SEC,
+        )
+        return True
+    return False
+
+
 def circuit_state() -> dict:
     """Snapshot of circuit breaker state. Used by /stats."""
     import time as _t
     now = _t.time()
     blocked = sum(1 for _, v in _verdict_log if v == "blocked")
     total = len(_verdict_log)
+
+    def _pstate(p: str) -> dict:
+        plog = _verdict_log_by_provider.get(p, [])
+        pblocked = sum(1 for _, v in plog if v == "blocked")
+        ptotal = len(plog)
+        return {
+            "open": _circuit_open_until_by_provider.get(p, 0.0) > now,
+            "open_for_sec": max(0, int(_circuit_open_until_by_provider.get(p, 0.0) - now)),
+            "window_samples": ptotal,
+            "window_blocked": pblocked,
+            "block_rate": round(pblocked / ptotal, 2) if ptotal else 0.0,
+        }
+
     return {
         "open": _circuit_open_until > now,
         "open_for_sec": max(0, int(_circuit_open_until - now)),
         "window_samples": total,
         "window_blocked": blocked,
         "block_rate": round(blocked / total, 2) if total else 0.0,
+        "per_provider": {"primary": _pstate("primary"), "fallback": _pstate("fallback")},
     }
 
 # Per-provider cooldowns. Tracking primary (Kimi) and fallback (MiniMax)
@@ -276,6 +328,108 @@ def _retry_after_seconds(e: BaseException) -> float:
 # Per-provider rate-limit alert coalescing is now handled by
 # Notifier.send_coalesced(key=f"rate_limit:{provider}"). The ad-hoc state
 # that used to live here is redundant.
+
+# Preemptive rate-limit prediction: we track the wall-time of each
+# outgoing agent.ainvoke per-provider. If the rate in the sliding
+# window is within ``_RATE_APPROACH_HEADROOM`` of the provider's
+# advertised limit, we sleep briefly to let the window decay. Hitting
+# 429 costs 15m of floor-cooldown; 3-10s of preemptive slowdown is
+# far cheaper. Approximate — providers don't reveal the exact window
+# shape — but good enough to dodge the 429 flip-flop.
+_REQ_WINDOW_SEC = 5 * 60 * 60     # match Kimi 4h / MiniMax 5h window order of magnitude
+_RATE_APPROACH_HEADROOM = 0.10    # sleep when within 10% of advertised rate
+_request_ticks: dict[str, list[float]] = {"primary": [], "fallback": []}
+
+
+def _note_request(provider: str) -> None:
+    """Record one outgoing ainvoke so the predictor has data to work with."""
+    import time as _t
+    now = _t.time()
+    ticks = _request_ticks.setdefault(provider, [])
+    ticks.append(now)
+    cutoff = now - _REQ_WINDOW_SEC
+    while ticks and ticks[0] < cutoff:
+        ticks.pop(0)
+
+
+def _throttle_for_rate_approach(worker_id: int) -> None:
+    """Sleep briefly (sync) when we're approaching either provider's
+    advertised limit. Synchronous sleep keeps the worker off the CPU
+    without an extra await, matching the existing rate-limit sleep
+    style; kept short (<=10s) so the worker isn't dead if traffic dries up."""
+    import time as _t
+    limits = {"primary": settings.minimax_rate_limit, "fallback": settings.minimax_rate_limit}
+    # Only apply predictor when the limit is positive AND config has given
+    # us a ceiling to predict against. Default minimax_rate_limit is 4500.
+    for provider, limit in limits.items():
+        if limit <= 0:
+            continue
+        ticks = _request_ticks.get(provider, [])
+        if not ticks:
+            continue
+        approach = limit * (1.0 - _RATE_APPROACH_HEADROOM)
+        if len(ticks) >= approach:
+            # Linear extrapolation: remaining headroom = limit - len(ticks),
+            # window decay rate = len(ticks)/window. Sleep until one tick
+            # ages out, capped at 10s so we don't wedge the worker.
+            sleep_for = max(1.0, min(10.0, _REQ_WINDOW_SEC / max(1, len(ticks))))
+            log.info(
+                "rate_approach_throttle",
+                worker=worker_id,
+                provider=provider,
+                ticks_in_window=len(ticks),
+                limit=limit,
+                sleep_sec=round(sleep_for, 1),
+            )
+            _t.sleep(sleep_for)
+            return  # one throttle per iteration is enough
+
+
+# Stuck-worker watchdog: each worker reports its last progress moment
+# into ``_worker_heartbeat`` before entering agent.ainvoke. A separate
+# task periodically scans for entries older than STUCK_THRESHOLD_SEC and
+# logs them; killing a coroutine from outside is messy, so we log loud
+# (operators see it in /stats, Langfuse, Telegram). Future: asyncio
+# cancel when we trust the signal.
+_worker_heartbeat: dict[int, tuple[float, str]] = {}   # worker_id → (ts, feature_id)
+STUCK_THRESHOLD_SEC = int(settings.per_feature_timeout_sec * 1.5)
+
+
+def _beat(worker_id: int, feature_id: str) -> None:
+    """Workers call this whenever they make meaningful progress (claim,
+    ainvoke start/end, verify). A worker that's not beating for
+    STUCK_THRESHOLD_SEC is considered wedged."""
+    import time as _t
+    _worker_heartbeat[worker_id] = (_t.time(), feature_id)
+
+
+async def _watchdog() -> None:
+    """Background task: scan heartbeat dict every 60s, log stuck workers."""
+    import time as _t
+    while True:
+        await asyncio.sleep(60)
+        now = _t.time()
+        for wid, (ts, fid) in list(_worker_heartbeat.items()):
+            age = now - ts
+            if age > STUCK_THRESHOLD_SEC:
+                log.warning(
+                    "worker_stuck",
+                    worker=wid,
+                    feature=fid,
+                    age_sec=int(age),
+                    threshold=STUCK_THRESHOLD_SEC,
+                )
+
+
+def watchdog_state() -> dict:
+    """Snapshot for /stats. Returns each worker's last-heartbeat age."""
+    import time as _t
+    now = _t.time()
+    return {
+        str(wid): {"feature": fid, "age_sec": int(now - ts)}
+        for wid, (ts, fid) in _worker_heartbeat.items()
+    }
+
 
 # Atomic claim lock: with multiple workers we must never let two workers grab
 # the same pending feature. Also used to enforce a single-self-improvement rule
@@ -520,6 +674,8 @@ async def run_once(
                 attempt=attempt,
                 active_provider=active_provider,
             )
+            _beat(worker_id, feature.id)
+            _note_request(active_provider)
             result = await asyncio.wait_for(
                 active.ainvoke(
                     {"messages": [{"role": "user", "content": prompt}]},
@@ -536,6 +692,7 @@ async def run_once(
                 ),
                 timeout=settings.per_feature_timeout_sec,
             )
+            _beat(worker_id, feature.id)
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
             # Rescue stray diffs: if the agent wrote files in a worktree but
@@ -581,7 +738,7 @@ async def run_once(
             # feature_end notification will include "attempts=N" if it matters.
 
         backlog.set_status(feature.id, verdict)
-        _record_verdict(verdict)
+        _record_verdict(verdict, provider=active_provider)
         if verdict == "done":
             # Clear the heal hint so future re-runs (idea engine duplicates,
             # manual re-queues) start from a clean prompt instead of carrying
@@ -764,10 +921,21 @@ async def _worker(
             continue
 
         now = asyncio.get_event_loop().time()
-        primary_cool = _primary_cooldown_until > now
+        # Per-provider circuit breakers: quality collapse on ONE provider
+        # shouldn't pause the loop if the other is fine. We just remove the
+        # bad provider from selection until its cooldown expires.
+        primary_quarantined = _check_provider_circuit("primary")
+        fallback_quarantined = _check_provider_circuit("fallback")
+        primary_cool = _primary_cooldown_until > now or primary_quarantined
         fallback_cool = (
-            fallback_agent is not None and _fallback_cooldown_until > now
+            fallback_agent is not None
+            and (_fallback_cooldown_until > now or fallback_quarantined)
         )
+        # Preemptive rate-limit throttle: if we're approaching the advertised
+        # limit, sleep briefly to let the window slide. Avoids the 429 →
+        # cooldown flip-flop that spikes tail latency. Uses recent request
+        # counts tracked in _request_ticks (see _note_request below).
+        _throttle_for_rate_approach(worker_id)
 
         if primary_cool and (fallback_agent is None or fallback_cool):
             # Nothing to use — sleep until whichever cooldown ends first.
@@ -850,7 +1018,8 @@ async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None =
 
     try:
         await asyncio.gather(
-            *[_worker(i, backlog, agent, notifier, fallback_agent) for i in range(n)]
+            _watchdog(),
+            *[_worker(i, backlog, agent, notifier, fallback_agent) for i in range(n)],
         )
     finally:
         await notifier.close()

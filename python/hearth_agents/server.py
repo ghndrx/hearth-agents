@@ -133,7 +133,12 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         """Operational stats: backlog breakdown, recent velocity, split + heal
         activity, circuit-breaker state. Exists so operators can diagnose
         regressions without log-grepping."""
-        from .loop import _primary_cooldown_until, _fallback_cooldown_until, circuit_state
+        from .loop import (
+            _primary_cooldown_until,
+            _fallback_cooldown_until,
+            circuit_state,
+            watchdog_state,
+        )
         import asyncio as _asyncio
         import time as _time
 
@@ -185,6 +190,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 "fallback_cooldown_sec": max(0, int(_fallback_cooldown_until - now_monotonic)),
             },
             "circuit_breaker": circuit_state(),
+            "workers": watchdog_state(),
         }
 
     @app.post("/webhooks/github")
