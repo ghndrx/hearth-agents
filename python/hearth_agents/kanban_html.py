@@ -137,7 +137,7 @@ KANBAN_HTML = r"""<!doctype html>
         </div>
         <div class="col-body">
           <template x-for="f in featuresByColumn(col)" :key="f.id">
-            <div class="card">
+            <div class="card" :style="selectedId === f.id ? 'outline: 2px solid var(--impl);' : ''" @click="selectedId = f.id">
               <div class="row">
                 <span class="name" :title="f.name" x-text="f.name"></span>
                 <span class="pill" :class="'pri-' + f.priority" x-text="f.priority"></span>
@@ -204,6 +204,9 @@ KANBAN_HTML = r"""<!doctype html>
   </div>
 
   <div class="toast" x-show="toast" x-text="toast" :class="toastErr ? 'err' : ''"></div>
+  <div style="position:fixed;bottom:8px;left:8px;color:var(--muted);font-size:10px;">
+    shortcuts: / search · j/k navigate · a approve · r retry · n nuke · d debate · ? help
+  </div>
 
   <template x-if="depGraph !== null">
     <div>
@@ -377,6 +380,7 @@ function kanban() {
     filterText: '',
     kindFilter: '',
     riskFilter: '',
+    selectedId: null,
     toast: '',
     toastErr: false,
     lastRefresh: Date.now(),
@@ -406,6 +410,39 @@ function kanban() {
       setInterval(() => {
         this.sinceLabel = Math.floor((Date.now() - this.lastRefresh) / 1000).toString();
       }, 1000);
+      // Keyboard shortcuts. Skip when typing in an input/textarea so
+      // the filter box + add-modal still behave normally.
+      document.addEventListener('keydown', (e) => {
+        const tag = (e.target && e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === '/') {
+          e.preventDefault();
+          const sel = document.querySelector('input[type="search"]');
+          if (sel) sel.focus();
+        } else if (e.key === '?') {
+          alert('Shortcuts:\\n  /    focus search\\n  j/k  next / prev feature\\n  a    approve selected\\n  r    retry selected\\n  n    nuke selected\\n  d    debate selected\\n  Esc  clear selection');
+        } else if (e.key === 'j' || e.key === 'k') {
+          const flat = this.columns.flatMap(c => this.featuresByColumn(c).map(f => f.id));
+          if (!flat.length) return;
+          const cur = flat.indexOf(this.selectedId);
+          const next = e.key === 'j' ? Math.min(flat.length - 1, cur + 1) : Math.max(0, cur - 1);
+          this.selectedId = flat[next] || flat[0];
+        } else if (e.key === 'Escape') {
+          this.selectedId = null;
+        } else if (this.selectedId && ['a','r','n','d'].includes(e.key)) {
+          const f = this.features.find(x => x.id === this.selectedId);
+          if (!f) return;
+          if (e.key === 'a') this.act(f.id, 'approve');
+          else if (e.key === 'r') this.act(f.id, 'retry');
+          else if (e.key === 'n') this.confirmNuke(f);
+          else if (e.key === 'd') {
+            fetch('/features/' + encodeURIComponent(f.id) + '/debate', {method:'POST'})
+              .then(r => r.json()).then(b => this.flash('debate: ' + JSON.stringify(b).slice(0, 120)))
+              .catch(e => this.flash('debate failed: ' + e.message, true));
+          }
+        }
+      });
     },
     async refresh() {
       try {

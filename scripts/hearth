@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""hearth — CLI wrapper around the hearth-agents HTTP API.
+
+Usage:
+  hearth status                              # /stats summary
+  hearth features [--status=X] [--kind=Y] [--query='kind:bug AND heal_attempts>=2']
+  hearth show <feature_id>                   # full feature + recent history
+  hearth queue <id> <name> <description>     # POST /features
+  hearth bug <id> <name> <repro> <desc>      # POST /features kind=bug
+  hearth approve|retry|nuke <id>             # POST /features/{id}/action
+  hearth debate <id>                         # POST /features/{id}/debate
+  hearth cost                                # /cost-analytics + forecast
+  hearth who                                 # active workers
+  hearth health                              # /health with subsystem status
+  hearth dep <id>                            # deps + blocked-by
+  hearth tail                                # last 20 transitions
+
+Env:
+  HEARTH_URL  base URL (default https://hearth.walleye-frog.ts.net)
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.request
+import urllib.parse
+import urllib.error
+
+
+BASE = os.environ.get("HEARTH_URL", "https://hearth.walleye-frog.ts.net").rstrip("/")
+
+
+def _req(method: str, path: str, body: dict | None = None, params: dict | None = None):
+    url = BASE + path
+    if params:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"} if data else {}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        print(f"HTTP {e.code}: {e.read().decode()[:400]}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_status(args: list[str]) -> None:
+    d = _req("GET", "/stats")
+    print(f"backlog: {d['stats']}")
+    print(f"recent_24h: done={d['recent_24h']['done']} blocked={d['recent_24h']['blocked']}")
+    for r in d.get("block_reasons_top10", [])[:5]:
+        print(f"  {r['count']}× {r['reason'][:80]}")
+
+
+def cmd_features(args: list[str]) -> None:
+    params = {}
+    for a in args:
+        if a.startswith("--status="): params["status"] = a.split("=", 1)[1]
+        elif a.startswith("--kind="): params["kind"] = a.split("=", 1)[1]
+        elif a.startswith("--query="): params["query"] = a.split("=", 1)[1]
+        elif a.startswith("--q="): params["q"] = a.split("=", 1)[1]
+    rows = _req("GET", "/features", params=params)
+    for f in rows[:80]:
+        mark = "●" if f["status"] == "done" else "○" if f["status"] == "pending" else "◐"
+        print(f"  {mark} [{f['status']:12s}] {f['priority']:8s} {f['kind']:10s} {f['id']}: {f['name'][:60]}")
+    print(f"\n{len(rows)} shown")
+
+
+def cmd_show(args: list[str]) -> None:
+    if not args:
+        print("usage: hearth show <feature_id>", file=sys.stderr); sys.exit(2)
+    h = _req("GET", f"/features/{urllib.parse.quote(args[0])}/history")
+    f = h.get("feature") or {}
+    print(f"{f.get('id')}: {f.get('name')}")
+    print(f"  status={f.get('status')} kind={f.get('kind')} priority={f.get('priority')} heal_attempts={f.get('heal_attempts')}")
+    if f.get('depends_on'): print(f"  deps: {', '.join(f['depends_on'])}")
+    if f.get('heal_hint'): print(f"  hint: {f['heal_hint'][:200]}")
+    print(f"\nrecent transitions ({len(h.get('transitions', []))} total):")
+    for t in (h.get("transitions") or [])[-5:]:
+        print(f"  {t.get('ts')} {t.get('from','-')} → {t.get('to')} [{t.get('actor','?')}] {(t.get('reason','') or '')[:60]}")
+
+
+def cmd_queue(args: list[str]) -> None:
+    if len(args) < 3:
+        print("usage: hearth queue <id> <name> <description>", file=sys.stderr); sys.exit(2)
+    r = _req("POST", "/features", body={"id": args[0], "name": args[1], "description": args[2]})
+    print(f"queued: {r}")
+
+
+def cmd_bug(args: list[str]) -> None:
+    if len(args) < 4:
+        print("usage: hearth bug <id> <name> <repro_cmd> <description>", file=sys.stderr); sys.exit(2)
+    r = _req("POST", "/features", body={
+        "id": args[0], "name": args[1], "description": args[3],
+        "kind": "bug", "repro_command": args[2], "priority": "high",
+    })
+    print(f"queued bug: {r}")
+
+
+def cmd_action(action: str, args: list[str]) -> None:
+    if not args:
+        print(f"usage: hearth {action} <feature_id>", file=sys.stderr); sys.exit(2)
+    r = _req("POST", f"/features/{urllib.parse.quote(args[0])}/action", body={"action": action})
+    print(r)
+
+
+def cmd_debate(args: list[str]) -> None:
+    if not args:
+        print("usage: hearth debate <feature_id>", file=sys.stderr); sys.exit(2)
+    r = _req("POST", f"/features/{urllib.parse.quote(args[0])}/debate")
+    for item in r.get("results", []):
+        print(f"  {item.get('tag')}: {item.get('tool_count', 0)} tools · {item.get('input_tokens', 0)}in/{item.get('output_tokens', 0)}out")
+
+
+def cmd_cost(args: list[str]) -> None:
+    d = _req("GET", "/cost-analytics")
+    f = _req("GET", "/cost-analytics/forecast")
+    print(f"total: ${d['total_cost_usd']:.4f}  (in:{d['total_input_tokens']:,} out:{d['total_output_tokens']:,})")
+    print(f"p50 duration: {d['duration_percentiles']['p50']}s · p95: {d['duration_percentiles']['p95']}s")
+    print(f"month-to-date: ${f['month_to_date_usd']:.4f}  forecast: ${f['forecast_usd']:.4f} (avg ${f['trend_avg_daily_usd']:.4f}/d)")
+
+
+def cmd_who(args: list[str]) -> None:
+    d = _req("GET", "/stats")
+    for wid, info in (d.get("workers") or {}).items():
+        print(f"  w{wid}: {info['feature']} ({info['age_sec']}s ago)")
+
+
+def cmd_health(args: list[str]) -> None:
+    h = _req("GET", "/health")
+    print(f"status: {h['status']}")
+    for name, info in h.get("subsystems", {}).items():
+        mark = "✗" if info['stale'] else "✓"
+        age = "never" if info['age_sec'] < 0 else f"{info['age_sec']}s ago"
+        print(f"  {mark} {name}: {age}")
+
+
+def cmd_dep(args: list[str]) -> None:
+    if not args:
+        print("usage: hearth dep <feature_id>", file=sys.stderr); sys.exit(2)
+    h = _req("GET", f"/features/{urllib.parse.quote(args[0])}/history")
+    f = h.get("feature") or {}
+    deps = f.get("depends_on") or []
+    print(f"{args[0]}: deps={deps or '(none)'}")
+    if deps:
+        feats = _req("GET", "/features")
+        lookup = {x["id"]: x for x in feats}
+        for d in deps:
+            fd = lookup.get(d, {})
+            mark = "✓" if fd.get("status") == "done" else "○"
+            print(f"  {mark} {d}: {fd.get('status', '(missing from backlog)')}")
+
+
+def cmd_tail(args: list[str]) -> None:
+    limit = int(args[0]) if args else 20
+    rows = _req("GET", "/transitions", params={"limit": limit})
+    for t in rows:
+        print(f"  {t.get('ts')} {t.get('feature_id','?'):40s} {t.get('from','-')} → {t.get('to')} [{t.get('actor','?')}]")
+
+
+COMMANDS = {
+    "status": cmd_status, "features": cmd_features, "show": cmd_show,
+    "queue": cmd_queue, "bug": cmd_bug,
+    "approve": lambda a: cmd_action("approve", a),
+    "retry": lambda a: cmd_action("retry", a),
+    "nuke": lambda a: cmd_action("nuke", a),
+    "debate": cmd_debate, "cost": cmd_cost,
+    "who": cmd_who, "health": cmd_health, "dep": cmd_dep, "tail": cmd_tail,
+}
+
+
+def main() -> None:
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__); sys.exit(0 if len(sys.argv) > 1 and sys.argv[1] in ("-h","--help","help") else 2)
+    cmd = sys.argv[1]
+    handler = COMMANDS.get(cmd)
+    if handler is None:
+        print(f"unknown command: {cmd}\nRun 'hearth help' for usage.", file=sys.stderr); sys.exit(2)
+    handler(sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

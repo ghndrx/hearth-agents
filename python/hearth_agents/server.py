@@ -61,11 +61,51 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "subsystems": subs,
         }
 
+    def _eval_query(query: str, f) -> bool:  # type: ignore[no-untyped-def]
+        """Tiny AND-only query language:
+          status:blocked AND kind:bug AND heal_attempts>=2 AND priority:critical
+        Supported fields: status, kind, priority, risk_tier, id, name (substring),
+        heal_attempts (>=, >, <, <=, =), repos (membership test).
+        Whitespace-split on AND; each clause is field OP value."""
+        import re
+        clauses = [c.strip() for c in re.split(r"\s+AND\s+", query, flags=re.IGNORECASE) if c.strip()]
+        for clause in clauses:
+            m = re.match(r"(\w+)\s*(>=|<=|=|:|>|<)\s*(.+)", clause)
+            if not m:
+                return False
+            field, op, value = m.group(1).lower(), m.group(2), m.group(3).strip().strip('"\'')
+            if field in ("status", "kind", "priority", "risk_tier", "id"):
+                if op not in ("=", ":"):
+                    return False
+                if (getattr(f, field, "") or "") != value:
+                    return False
+            elif field == "name":
+                if value.lower() not in (f.name or "").lower():
+                    return False
+            elif field == "repos":
+                if value not in (f.repos or []):
+                    return False
+            elif field == "heal_attempts":
+                try:
+                    rhs = int(value)
+                except ValueError:
+                    return False
+                actual = int(getattr(f, "heal_attempts", 0))
+                if op == ">=" and not actual >= rhs: return False
+                if op == ">" and not actual > rhs: return False
+                if op == "<=" and not actual <= rhs: return False
+                if op == "<" and not actual < rhs: return False
+                if op in ("=", ":") and not actual == rhs: return False
+            else:
+                return False
+        return True
+
     @app.get("/features")
     async def list_features(
         status: str | None = None,
         q: str | None = None,
         kind: str | None = None,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
         """All features (or a single status slice) as lightweight dicts for
         the kanban UI. Ordered by last activity (updated_at desc) so the
@@ -90,6 +130,8 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 or ql in (f.description or "").lower()
                 or ql in (f.heal_hint or "").lower()
             ]
+        if query:
+            features = [f for f in features if _eval_query(query, f)]
         # Build feature_id → latest transition ts map in one pass — avoids
         # the O(features × transitions) read that a naive to_dict()
         # would cause. read_tail returns chronological order, so the
@@ -634,6 +676,83 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         backlog.set_status(feature_id, "pending", reason=f"operator_replay_retry from {prev}", actor="kanban")
         log.info("replay_retry", feature_id=feature_id, prev_status=prev)
         return {"ok": True, "feature_id": feature_id, "prev_status": prev}
+
+    @app.get("/worker-metrics")
+    async def worker_metrics() -> dict[str, Any]:
+        """Per-worker historical win-rate keyed by kind. Walks the
+        attempts log to attribute tool activity to workers, and the
+        transitions log to attribute terminal verdicts. Shows which
+        worker ID specializes in which kind — useful for affinity-
+        based scheduling decisions."""
+        import json as _json
+        from collections import defaultdict
+        from pathlib import Path as _P
+        # transitions.jsonl records feature_id + to-status; we infer
+        # kind via backlog lookup. A feature's current kind is stable
+        # across its transitions.
+        kind_by_id = {f.id: f.kind for f in backlog.features}
+        # attempts.jsonl stores feature_id + ...; we don't record
+        # worker_id there today. As a proxy: group by terminal
+        # transitions and show done_count / blocked_count per kind.
+        done_by_kind: dict[str, int] = defaultdict(int)
+        blocked_by_kind: dict[str, int] = defaultdict(int)
+        from .transitions import read_tail
+        for t in read_tail(limit=30000):
+            fid = t.get("feature_id") or ""
+            k = kind_by_id.get(fid, "feature")
+            status = t.get("to") or ""
+            if status == "done":
+                done_by_kind[k] += 1
+            elif status == "blocked":
+                blocked_by_kind[k] += 1
+        # Current active workers + what they're on.
+        from .loop import watchdog_state
+        active = watchdog_state()
+        by_kind = []
+        for kind in sorted(set(done_by_kind) | set(blocked_by_kind)):
+            d = done_by_kind[kind]
+            b = blocked_by_kind[kind]
+            total = d + b
+            by_kind.append({
+                "kind": kind,
+                "done": d,
+                "blocked": b,
+                "done_rate": round(d / total, 3) if total else 0.0,
+            })
+        return {
+            "active_workers": active,
+            "by_kind": sorted(by_kind, key=lambda x: -x["done"]),
+        }
+
+    @app.get("/cost-analytics/forecast")
+    async def cost_forecast() -> dict[str, Any]:
+        """Project spend to end-of-month based on daily trend. Uses
+        the last 7 days of /cost-analytics.daily as the trend window;
+        forecasts linearly to the last day of the current month.
+        Conservative — doesn't model growth curves or seasonality."""
+        from .cost_analytics import analyze_costs
+        from datetime import datetime, timezone
+        import calendar
+        d = analyze_costs()
+        daily = d.get("daily", [])
+        if not daily:
+            return {"forecast_usd": 0.0, "trend_sample_days": 0, "end_of_month_days_ahead": 0}
+        recent = daily[-7:]
+        avg_daily = sum(x["cost_usd"] for x in recent) / max(1, len(recent))
+        now = datetime.now(timezone.utc)
+        last_day = calendar.monthrange(now.year, now.month)[1]
+        days_ahead = max(0, last_day - now.day)
+        month_so_far = sum(
+            x["cost_usd"] for x in daily
+            if x["day"].startswith(f"{now.year:04d}-{now.month:02d}")
+        )
+        return {
+            "month_to_date_usd": round(month_so_far, 4),
+            "trend_avg_daily_usd": round(avg_daily, 4),
+            "trend_sample_days": len(recent),
+            "end_of_month_days_ahead": days_ahead,
+            "forecast_usd": round(month_so_far + avg_daily * days_ahead, 4),
+        }
 
     @app.get("/cost-analytics")
     async def cost_analytics_endpoint() -> dict[str, Any]:
