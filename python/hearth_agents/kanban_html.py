@@ -109,6 +109,7 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="refresh()">refresh</button>
       <button @click="openAddModal()" style="background: var(--done); color: #fff; border-color: var(--done);">+ add</button>
       <button @click="loadAnalytics()">analytics</button>
+      <button @click="loadSchedule()">schedule</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve blocked</button>
       <button :disabled="!escalatedFeatures.length" @click="bulkRetryEscalated()" title="Reset heal_attempts and re-queue every escalated feature">retry escalated</button>
     </div>
@@ -143,6 +144,15 @@ KANBAN_HTML = r"""<!doctype html>
                 <template x-if="f.heal_attempts > 0">
                   <span class="repo" x-text="'heal ' + f.heal_attempts + '/3'"></span>
                 </template>
+                <template x-if="f.depends_on && f.depends_on.length">
+                  <span class="repo" :title="'depends on: ' + f.depends_on.join(', ')" style="background: #6e7b8f; color: #fff;" x-text="'↘ ' + f.depends_on.length + ' dep' + (f.depends_on.length === 1 ? '' : 's')"></span>
+                </template>
+                <template x-if="f.kind && f.kind !== 'feature'">
+                  <span class="repo" :style="kindColor(f.kind)" x-text="f.kind"></span>
+                </template>
+                <template x-if="f.risk_tier && f.risk_tier !== 'low'">
+                  <span class="repo" :style="'background:'+(f.risk_tier === 'high' ? 'var(--blocked)' : 'var(--pri-high)')+';color:#fff;'" x-text="'risk: ' + f.risk_tier"></span>
+                </template>
                 <span class="age" :title="'created ' + f.created_at + ' · updated ' + f.updated_at" x-text="ageLabel(f.updated_at)"></span>
               </div>
               <template x-if="f.heal_hint">
@@ -159,6 +169,9 @@ KANBAN_HTML = r"""<!doctype html>
                 <a class="btn" :href="ghBranchUrl(f)" target="_blank" x-show="f.status !== 'pending'">branch</a>
                 <button @click="toggleHistory(f.id)" x-text="history[f.id] ? 'hide history' : 'history'"></button>
                 <a class="btn" :href="'/replay/' + encodeURIComponent(f.id)" target="_blank">replay</a>
+                <template x-if="f.status === 'blocked' || (f.heal_attempts || 0) > 0">
+                  <button @click="replayRetry(f)" title="Clear hint + heal_attempts and re-queue from scratch">fresh retry</button>
+                </template>
                 <template x-if="f.status === 'done'">
                   <button @click="confirmCleanup(f)" title="Delete origin branch + local worktree">cleanup</button>
                 </template>
@@ -186,6 +199,25 @@ KANBAN_HTML = r"""<!doctype html>
   </div>
 
   <div class="toast" x-show="toast" x-text="toast" :class="toastErr ? 'err' : ''"></div>
+
+  <template x-if="schedule !== null">
+    <div>
+      <div class="modal-backdrop" @click="schedule = null"></div>
+      <div class="modal" style="inset: 8% 8%;">
+        <button class="close" @click="schedule = null">close</button>
+        <h2>Scheduled recurring features</h2>
+        <p style="font-size: 11px; color: var(--muted);">
+          Edit the JSON below and save. Scheduler re-reads every 60s; no restart needed.<br>
+          Format: <code>[{"name":"...","every_hours":168,"last_fire_ts":0,"feature":{"id_prefix":"...","name":"...","description":"...","kind":"security","priority":"medium","repos":["hearth"]}}]</code>
+        </p>
+        <textarea x-model="scheduleJson" rows="22" style="width:100%;background:#0d1117;color:var(--fg);border:1px solid var(--border);padding:8px;font-family:SFMono-Regular,Menlo,monospace;font-size:11px;"></textarea>
+        <div style="margin-top:8px;">
+          <button style="background:var(--done);color:#fff;border:0;padding:6px 12px;border-radius:3px;cursor:pointer;" @click="saveSchedule()">save</button>
+          <span class="meta" x-text="scheduleStatus"></span>
+        </div>
+      </div>
+    </div>
+  </template>
 
   <template x-if="addForm">
     <div>
@@ -289,6 +321,9 @@ function kanban() {
     history: {},
     analytics: null,
     addForm: null,
+    schedule: null,
+    scheduleJson: '',
+    scheduleStatus: '',
     filterText: '',
     kindFilter: '',
     riskFilter: '',
@@ -377,6 +412,63 @@ function kanban() {
         await this.refresh();
       } catch (e) {
         this.flash('queue failed: ' + e.message, true);
+      }
+    },
+    kindColor(kind) {
+      const map = {
+        bug: 'background:#da3633;color:#fff;',
+        refactor: 'background:#8957e5;color:#fff;',
+        schema: 'background:#1f6feb;color:#fff;',
+        security: 'background:#f85149;color:#fff;',
+        incident: 'background:#ff6f00;color:#fff;',
+        'perf-revert': 'background:#0891a3;color:#fff;',
+      };
+      return map[kind] || 'background:#21262d;color:var(--muted);';
+    },
+    async replayRetry(f) {
+      if (!confirm('Clear heal state + hint and re-queue ' + f.id + '? Next attempt has no prior context.')) return;
+      try {
+        const r = await fetch('/features/' + encodeURIComponent(f.id) + '/replay-retry', { method: 'POST' });
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.detail || 'HTTP ' + r.status);
+        this.flash('fresh-retry: ' + f.id);
+        await this.refresh();
+      } catch (e) {
+        this.flash('fresh-retry failed: ' + e.message, true);
+      }
+    },
+    async loadSchedule() {
+      try {
+        const r = await fetch('/schedule');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        this.scheduleJson = JSON.stringify(data, null, 2);
+        this.scheduleStatus = '';
+        this.schedule = data;
+      } catch (e) {
+        this.flash('schedule fetch failed: ' + e.message, true);
+      }
+    },
+    async saveSchedule() {
+      let parsed;
+      try {
+        parsed = JSON.parse(this.scheduleJson);
+      } catch (e) {
+        this.scheduleStatus = 'invalid JSON: ' + e.message;
+        return;
+      }
+      try {
+        const r = await fetch('/schedule', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsed),
+        });
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.detail || 'HTTP ' + r.status);
+        this.scheduleStatus = 'saved ' + body.count + ' entries at ' + new Date().toLocaleTimeString();
+        this.flash('schedule saved');
+      } catch (e) {
+        this.scheduleStatus = 'save failed: ' + e.message;
       }
     },
     async loadAnalytics() {

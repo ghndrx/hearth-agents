@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     )
     telegram_notify_chat_id: int = 0
 
+    # Additional notification destinations (optional; each one is
+    # independent of the others). Empty string disables that channel.
+    # All destinations receive the same message, fan-out happens in
+    # Notifier.send().
+    slack_webhook_url: str = ""
+    discord_webhook_url: str = ""
+
     # GitHub
     github_token: str = ""
     github_webhook_secret: str = ""

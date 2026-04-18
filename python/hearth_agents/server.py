@@ -234,6 +234,70 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from .replay import replay
         return replay(feature_id)
 
+    @app.get("/schedule")
+    async def schedule_list() -> list[dict[str, Any]]:
+        """Read the current /data/schedule.json for the kanban scheduler UI."""
+        import json as _json
+        from pathlib import Path as _P
+        path = _P("/data/schedule.json")
+        if not path.exists():
+            return []
+        try:
+            raw = _json.loads(path.read_text())
+            return raw if isinstance(raw, list) else []
+        except (OSError, _json.JSONDecodeError):
+            return []
+
+    @app.put("/schedule")
+    async def schedule_replace(payload: list[dict[str, Any]]) -> dict[str, Any]:
+        """Overwrite /data/schedule.json. Scheduler re-reads every 60s so
+        live edits take effect without restart. Validates minimally:
+        each entry needs name, every_hours>0, feature.id_prefix."""
+        import json as _json
+        from pathlib import Path as _P
+        if not isinstance(payload, list):
+            raise HTTPException(status_code=400, detail="body must be a JSON list")
+        cleaned: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            every = float(item.get("every_hours") or 0)
+            spec = item.get("feature") or {}
+            if not (name and every > 0 and isinstance(spec, dict) and spec.get("id_prefix")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"entry '{name or '?'}' missing required fields (name, every_hours>0, feature.id_prefix)",
+                )
+            cleaned.append({
+                "name": name,
+                "every_hours": every,
+                "last_fire_ts": float(item.get("last_fire_ts") or 0),
+                "feature": spec,
+            })
+        path = _P("/data/schedule.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(cleaned, indent=2))
+        log.info("schedule_updated", count=len(cleaned))
+        return {"ok": True, "count": len(cleaned)}
+
+    @app.post("/features/{feature_id}/replay-retry")
+    async def replay_retry(feature_id: str) -> dict[str, Any]:
+        """Aggressive retry: clears heal_hint AND heal_attempts AND flips
+        to pending, bypassing the healer's cap. Distinct from the kanban
+        'retry' action (which preserves hint) — use when the OPERATOR
+        believes the prior hint was counterproductive and wants a
+        fresh-context attempt."""
+        feature = next((f for f in backlog.features if f.id == feature_id), None)
+        if feature is None:
+            raise HTTPException(status_code=404, detail="feature not found")
+        prev = feature.status
+        feature.heal_attempts = 0
+        feature.heal_hint = ""
+        backlog.set_status(feature_id, "pending", reason=f"operator_replay_retry from {prev}", actor="kanban")
+        log.info("replay_retry", feature_id=feature_id, prev_status=prev)
+        return {"ok": True, "feature_id": feature_id, "prev_status": prev}
+
     @app.get("/cost-analytics")
     async def cost_analytics_endpoint() -> dict[str, Any]:
         """Per-feature + daily + per-provider token cost rollup from
