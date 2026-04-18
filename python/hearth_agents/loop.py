@@ -515,7 +515,33 @@ def _throttle_for_rate_approach(worker_id: int) -> None:
 # (operators see it in /stats, Langfuse, Telegram). Future: asyncio
 # cancel when we trust the signal.
 _worker_heartbeat: dict[int, tuple[float, str]] = {}   # worker_id → (ts, feature_id)
+_worker_last_error: dict[int, tuple[float, str, str]] = {}  # worker_id → (ts, feature_id, error)
+
+# Read-only mode: when True, workers skip _claim_next (no new features
+# get claimed). Background tasks (healer, scheduler, etc.) still run;
+# the loop just stops picking up work. Useful for maintenance windows
+# or when gateway-01 is under load and you want to freeze new spend.
+_read_only_mode: bool = False
+
+
+def set_read_only(enabled: bool) -> bool:
+    global _read_only_mode
+    prev = _read_only_mode
+    _read_only_mode = bool(enabled)
+    return prev
+
+
+def is_read_only() -> bool:
+    return _read_only_mode
 STUCK_THRESHOLD_SEC = int(settings.per_feature_timeout_sec * 1.5)
+
+
+def _record_worker_error(worker_id: int, feature_id: str, error: str) -> None:
+    """Called from exception / timeout handlers so operators can see
+    the last failure per worker without grepping logs. Trimmed to
+    200 chars; full stack traces still go to the structured log."""
+    import time as _t
+    _worker_last_error[worker_id] = (_t.time(), feature_id, error[:200])
 
 # Per-feature token accumulator. Reset per feature (not per attempt) so a
 # feature that spirals across 6 fixups trips the cap. Rough $/token pricing
@@ -571,13 +597,23 @@ async def _watchdog() -> None:
 
 
 def watchdog_state() -> dict:
-    """Snapshot for /stats. Returns each worker's last-heartbeat age."""
+    """Snapshot for /stats. Returns each worker's last-heartbeat age
+    plus the most recent error (if any)."""
     import time as _t
     now = _t.time()
-    return {
-        str(wid): {"feature": fid, "age_sec": int(now - ts)}
-        for wid, (ts, fid) in _worker_heartbeat.items()
-    }
+    out = {}
+    for wid, (ts, fid) in _worker_heartbeat.items():
+        entry = {"feature": fid, "age_sec": int(now - ts)}
+        err = _worker_last_error.get(wid)
+        if err is not None:
+            err_ts, err_fid, err_msg = err
+            entry["last_error"] = {
+                "feature_id": err_fid,
+                "error": err_msg,
+                "age_sec": int(now - err_ts),
+            }
+        out[str(wid)] = entry
+    return out
 
 
 # Atomic claim lock: with multiple workers we must never let two workers grab
@@ -975,6 +1011,9 @@ async def run_once(
     to set if a 429 fires — without it we couldn't tell whether the failure
     came from primary (Kimi) or fallback (MiniMax) and we'd ping-pong.
     """
+    if _read_only_mode:
+        log.debug("loop_idle", reason="read_only_mode")
+        return False
     feature = await _claim_next(backlog, worker_id=worker_id)
     if feature is None:
         log.debug("loop_idle", reason="no_pending_features")
@@ -1311,6 +1350,7 @@ async def run_once(
             await notifier.send(f"✅ [w{worker_id}] done {feature.id}: {feature.name}{suffix}")
     except asyncio.TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
+        _record_worker_error(worker_id, feature.id, f"timeout after {settings.per_feature_timeout_sec}s")
         # Rescue BEFORE marking blocked — the timeout may have killed the
         # agent mid-write, leaving real code uncommitted in the worktree.
         # Without this call, a 10-min timeout discards N files of legit work.
@@ -1370,6 +1410,7 @@ async def run_once(
             )
         else:
             log.exception("feature_failed", id=feature.id, error=str(e))
+            _record_worker_error(worker_id, feature.id, f"{type(e).__name__}: {e}"[:200])
             # Rescue before marking blocked — same rationale as the timeout
             # branch: the exception may have killed the agent mid-write. Don't
             # discard real uncommitted code just because something downstream

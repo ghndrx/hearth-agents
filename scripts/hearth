@@ -288,6 +288,24 @@ def cmd_build(args: list[str]) -> None:
         print(f"  {k}: {v}")
 
 
+def cmd_read_only(args: list[str]) -> None:
+    """hearth read-only [on|off] — toggle loop quiesce."""
+    if not args:
+        r = _req("POST", "/admin/read-only", body={})
+        print(f"read_only: {r.get('read_only')}")
+        return
+    on = args[0].lower() in ("on", "true", "yes", "1", "enable")
+    r = _req("POST", "/admin/read-only", body={"enabled": on})
+    print(f"read_only: {r.get('read_only')} (was {r.get('previous')})")
+
+
+def cmd_validate(args: list[str]) -> None:
+    v = _req("GET", "/backlog/validate")
+    print(f"features: {v['total_features']} · problems: {v['problem_count']} · healthy: {v['healthy']}")
+    for p in v.get("problems", [])[:20]:
+        print(f"  {p['id']}: {', '.join(p['issues'])}")
+
+
 def cmd_bulk(args: list[str]) -> None:
     """hearth bulk <action> <query-dsl> — bulk-action by query."""
     if len(args) < 2:
@@ -319,6 +337,7 @@ COMMANDS = {
     "deploy": cmd_deploy,
     "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
+    "read-only": cmd_read_only, "validate": cmd_validate,
 }
 
 

@@ -1245,6 +1245,60 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         ]
         return {"nodes": nodes, "edges": edges}
 
+    @app.post("/admin/read-only")
+    async def admin_read_only(payload: dict[str, Any]) -> dict[str, Any]:
+        """Toggle loop read-only mode. Body: {"enabled": true|false}.
+        When enabled, workers stop claiming new features; in-flight work
+        finishes normally and all background tasks keep running. Lets
+        the operator pause forward motion during maintenance or when
+        gateway-01 is under load, without killing the process."""
+        from .loop import set_read_only, is_read_only
+        if "enabled" not in payload:
+            return {"read_only": is_read_only()}  # query mode
+        prev = set_read_only(bool(payload["enabled"]))
+        log.info("admin_read_only_toggled", previous=prev, current=is_read_only())
+        return {"read_only": is_read_only(), "previous": prev}
+
+    @app.get("/backlog/validate")
+    async def backlog_validate() -> dict[str, Any]:
+        """Check every Feature for schema drift: missing required
+        fields, invalid enum values, dangling depends_on references.
+        Read-only; surfaces problems without fixing them so operator
+        can decide between import/replace vs field-fix."""
+        valid_statuses = {"pending", "researching", "implementing", "reviewing", "done", "blocked"}
+        valid_kinds = {"feature", "bug", "refactor", "schema", "security", "incident", "perf-revert"}
+        valid_priorities = {"critical", "high", "medium", "low"}
+        valid_risks = {"low", "medium", "high"}
+        all_ids = {f.id for f in backlog.features}
+        problems: list[dict[str, Any]] = []
+        for f in backlog.features:
+            issues = []
+            if not f.id:
+                issues.append("missing id")
+            if not f.name:
+                issues.append("missing name")
+            if f.status not in valid_statuses:
+                issues.append(f"invalid status: {f.status}")
+            if f.kind not in valid_kinds:
+                issues.append(f"invalid kind: {f.kind}")
+            if f.priority not in valid_priorities:
+                issues.append(f"invalid priority: {f.priority}")
+            if f.risk_tier not in valid_risks:
+                issues.append(f"invalid risk_tier: {f.risk_tier}")
+            if f.kind == "bug" and not f.repro_command:
+                issues.append("kind=bug requires repro_command")
+            dangling = [d for d in (f.depends_on or []) if d not in all_ids]
+            if dangling:
+                issues.append(f"dangling depends_on: {dangling}")
+            if issues:
+                problems.append({"id": f.id, "issues": issues})
+        return {
+            "total_features": len(backlog.features),
+            "problem_count": len(problems),
+            "healthy": not problems,
+            "problems": problems[:100],
+        }
+
     @app.post("/admin/restart-task/{task_name}")
     async def restart_task(task_name: str) -> dict[str, Any]:
         """Re-spawn a wedged background task. Operator nudge — no full

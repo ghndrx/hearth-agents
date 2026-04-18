@@ -132,7 +132,13 @@ KANBAN_HTML = r"""<!doctype html>
         <span class="ml-auto text-[11px] text-muted font-mono tabular-nums" x-text="featuresByColumn(col).length"></span>
       </div>
       <div class="flex-1 overflow-y-auto scrollbar-thin px-2 py-2 space-y-2">
-        <template x-for="f in featuresByColumn(col)" :key="f.id">
+        <!-- Virtualization: when a column has >100 cards, show only the
+             first 100 + a "N more" summary. Rendering 300 cards × 5
+             columns kills Alpine on big backlogs. -->
+        <div class="text-[10px] text-muted text-center italic py-1" x-show="featuresByColumn(col).length > 100">
+          showing first 100 of <span x-text="featuresByColumn(col).length"></span> — use filter to narrow
+        </div>
+        <template x-for="f in featuresByColumn(col).slice(0, 100)" :key="f.id">
           <div class="card-enter bg-bg rounded-md border border-border p-2.5 hover:border-accent/40 transition-colors cursor-pointer"
                :class="selectedId === f.id ? 'ring-2 ring-accent' : ''"
                @click="selectedId = f.id">
