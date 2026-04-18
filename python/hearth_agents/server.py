@@ -43,13 +43,25 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
     @app.get("/features")
     async def list_features(status: str | None = None) -> list[dict[str, Any]]:
         """All features (or a single status slice) as lightweight dicts for
-        the kanban UI. Ordered newest-first so the board top is current work."""
+        the kanban UI. Ordered by last activity (updated_at desc) so the
+        board top is the currently-moving work, not the oldest-birthday."""
+        from .transitions import read_tail
         features = backlog.features
         if status:
             features = [f for f in features if f.status == status]
+        # Build feature_id → latest transition ts map in one pass — avoids
+        # the O(features × transitions) read that a naive to_dict()
+        # would cause. read_tail returns chronological order, so the
+        # last occurrence wins.
+        latest: dict[str, str] = {}
+        for t in read_tail(limit=10000):
+            fid = t.get("feature_id")
+            ts = t.get("ts")
+            if fid and ts:
+                latest[fid] = ts
         return sorted(
-            (f.to_dict() for f in features),
-            key=lambda d: d["created_at"],
+            (f.to_dict(updated_at=latest.get(f.id)) for f in features),
+            key=lambda d: d["updated_at"],
             reverse=True,
         )
 

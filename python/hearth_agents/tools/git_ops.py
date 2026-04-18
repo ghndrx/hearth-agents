@@ -136,6 +136,56 @@ _BLOCKED_DEBRIS_FILES = (
 )
 
 
+def _auto_format(repo_path: str) -> list[str]:
+    """Run language-appropriate formatters on staged files before commit.
+
+    Formatting-only churn (spacing, import ordering, trailing commas)
+    routinely pushed agent diffs past the 600-line cap even when the
+    semantic change was tiny. Running the formatter the human project
+    already uses strips this noise at the source.
+
+    Best-effort: every formatter is optional and errors are logged but
+    swallowed. Returns the list of formatters that actually ran.
+    """
+    code, out = _run(["git", "diff", "--cached", "--name-only"], cwd=repo_path, timeout=10)
+    if code != 0 or not out:
+        return []
+    paths = [p for p in out.splitlines() if p]
+    if not paths:
+        return []
+    go_files = [p for p in paths if p.endswith(".go")]
+    py_files = [p for p in paths if p.endswith(".py")]
+    ts_files = [p for p in paths if p.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte", ".json", ".yml", ".yaml", ".md"))]
+    rs_files = [p for p in paths if p.endswith(".rs")]
+    ran: list[str] = []
+    # gofmt -w is idempotent and ships with every Go toolchain
+    if go_files:
+        r = _run(["gofmt", "-w", *go_files], cwd=repo_path, timeout=30)
+        if r[0] == 0:
+            ran.append("gofmt")
+    # ruff is already a dev dep; format before check so format can clean
+    # whitespace without lint triggering on the same lines
+    if py_files:
+        r = _run(["ruff", "format", *py_files], cwd=repo_path, timeout=30)
+        if r[0] == 0:
+            ran.append("ruff format")
+    # prettier only if a local binary or package.json config is present;
+    # `npx --no-install` keeps us from pulling the world when unavailable
+    if ts_files:
+        r = _run(["npx", "--no-install", "prettier", "--write", *ts_files], cwd=repo_path, timeout=45)
+        if r[0] == 0:
+            ran.append("prettier")
+    if rs_files:
+        r = _run(["rustfmt", *rs_files], cwd=repo_path, timeout=30)
+        if r[0] == 0:
+            ran.append("rustfmt")
+    if ran:
+        # Re-stage any files the formatter touched so the commit captures
+        # the formatted version, not the pre-format staging.
+        _run(["git", "add", *paths], cwd=repo_path, timeout=10)
+    return ran
+
+
 def _scrub_blocked_paths(repo_path: str) -> tuple[int, list[str]]:
     """Unstage any paths matching known build-artifact / dependency-cache
     patterns before commit. Returns (unstaged_count, sample_paths).
@@ -191,6 +241,12 @@ def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = 
     scrubbed, sample = _scrub_blocked_paths(repo_path)
     if scrubbed:
         log.warning("git_commit_scrubbed_paths", repo=repo_path, count=scrubbed, sample=sample)
+    # Auto-format staged files so spacing/import-order churn doesn't push
+    # the diff past the 600-line cap. Runs per-language; each formatter is
+    # optional. Re-stages in-place when something runs.
+    formatters = _auto_format(repo_path)
+    if formatters:
+        log.info("git_commit_auto_formatted", repo=repo_path, formatters=formatters)
     code, out = _run(["git", "commit", "-m", message], cwd=repo_path, timeout=15)
     if code != 0:
         return f"commit failed: {out}"

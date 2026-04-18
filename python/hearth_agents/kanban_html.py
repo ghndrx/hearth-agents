@@ -29,7 +29,8 @@ KANBAN_HTML = r"""<!doctype html>
   header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-bottom: 1px solid var(--border); }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 12px; }
-  .board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px; height: calc(100vh - 58px); overflow: hidden; }
+  .board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 16px; height: calc(100vh - 58px); overflow: hidden; }
+  .col.escalated .col-head .dot { background: #8957e5; }
   .col { background: var(--card); border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; min-height: 0; }
   .col-head { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
   .col-head .dot { width: 10px; height: 10px; border-radius: 50%; }
@@ -91,14 +92,14 @@ KANBAN_HTML = r"""<!doctype html>
 
   <div class="board">
     <template x-for="col in columns" :key="col.key">
-      <div class="col">
+      <div class="col" :class="col.key">
         <div class="col-head">
           <span class="dot" :style="'background:' + col.color"></span>
           <span class="title" x-text="col.label"></span>
-          <span class="count" x-text="featuresByStatus(col.match).length"></span>
+          <span class="count" x-text="featuresByColumn(col).length"></span>
         </div>
         <div class="col-body">
-          <template x-for="f in featuresByStatus(col.match)" :key="f.id">
+          <template x-for="f in featuresByColumn(col)" :key="f.id">
             <div class="card">
               <div class="row">
                 <span class="name" :title="f.name" x-text="f.name"></span>
@@ -111,7 +112,7 @@ KANBAN_HTML = r"""<!doctype html>
                 <template x-if="f.heal_attempts > 0">
                   <span class="repo" x-text="'heal ' + f.heal_attempts + '/3'"></span>
                 </template>
-                <span class="age" :title="f.created_at" x-text="ageLabel(f.created_at)"></span>
+                <span class="age" :title="'created ' + f.created_at + ' · updated ' + f.updated_at" x-text="ageLabel(f.updated_at)"></span>
               </div>
               <template x-if="f.heal_hint">
                 <div class="heal" x-text="f.heal_hint"></div>
@@ -161,11 +162,14 @@ function kanban() {
     toastErr: false,
     lastRefresh: Date.now(),
     sinceLabel: '0',
+    // Ordered left→right as the natural flow. Escalated sits between
+    // blocked and done to make it obvious these need human attention.
     columns: [
-      { key: 'pending',      label: 'Pending',      color: 'var(--pending)', match: ['pending'] },
-      { key: 'implementing', label: 'Implementing', color: 'var(--impl)',    match: ['implementing', 'researching', 'reviewing'] },
-      { key: 'blocked',      label: 'Blocked',      color: 'var(--blocked)', match: ['blocked'] },
-      { key: 'done',         label: 'Done',         color: 'var(--done)',    match: ['done'] },
+      { key: 'pending',      label: 'Pending',      color: 'var(--pending)', match: ['pending'], escalated: false },
+      { key: 'implementing', label: 'Implementing', color: 'var(--impl)',    match: ['implementing', 'researching', 'reviewing'], escalated: false },
+      { key: 'blocked',      label: 'Blocked',      color: 'var(--blocked)', match: ['blocked'], escalated: false },
+      { key: 'escalated',    label: 'Escalated',    color: '#8957e5',        match: ['blocked'], escalated: true },
+      { key: 'done',         label: 'Done',         color: 'var(--done)',    match: ['done'], escalated: false },
     ],
     get blockedFeatures() { return this.features.filter(f => f.status === 'blocked'); },
     init() {
@@ -216,6 +220,14 @@ function kanban() {
     },
     featuresByStatus(statuses) {
       return this.features.filter(f => statuses.includes(f.status));
+    },
+    // Splits blocked features: escalated = heal_attempts >= 3 (healer gave
+    // up), blocked = everything else that's still in the heal rotation.
+    featuresByColumn(col) {
+      const base = this.features.filter(f => col.match.includes(f.status));
+      if (col.key === 'blocked') return base.filter(f => (f.heal_attempts || 0) < 3);
+      if (col.key === 'escalated') return base.filter(f => (f.heal_attempts || 0) >= 3);
+      return base;
     },
     async act(id, action) {
       try {

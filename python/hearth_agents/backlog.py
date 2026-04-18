@@ -56,9 +56,15 @@ class Feature:
     # before it burns verifier iterations (research job #3673).
     planner_estimate_lines: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived
-        ``branch`` hint and truncated ``heal_hint`` so cards stay compact."""
+        ``branch`` hint and truncated ``heal_hint`` so cards stay compact.
+
+        ``updated_at`` — when provided, overrides ``created_at`` as the
+        card's age reference. The server endpoint computes a
+        feature_id → latest_ts map once per request (see server.py) so
+        we don't re-read the transitions log N times.
+        """
         branch = f"feat/{self.id}"
         return {
             "id": self.id,
@@ -68,6 +74,7 @@ class Feature:
             "repos": list(self.repos),
             "status": self.status,
             "created_at": self.created_at,
+            "updated_at": updated_at or self.created_at,
             "heal_attempts": self.heal_attempts,
             "heal_hint": self.heal_hint[:500],
             "self_improvement": self.self_improvement,
