@@ -115,6 +115,15 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         capped = max(1, min(limit, 5000))
         return read_tail(limit=capped)
 
+    @app.get("/prompt-analytics")
+    async def prompt_analytics() -> dict[str, Any]:
+        """Per-prompts_version done-rate + top failure clusters. Reads the
+        transition log; no external state. Feeds the kanban analytics
+        drawer and is the foundation for DSPy-style prompt compilation
+        (research #3824)."""
+        from .prompt_analyzer import analyze
+        return analyze()
+
     @app.get("/features/{feature_id}/history")
     async def feature_history(feature_id: str) -> dict[str, Any]:
         """Per-feature transition timeline. Useful for RCA on 'why is
@@ -213,6 +222,14 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 await agent.ainvoke(
                     {"messages": [{"role": "user", "content": f"GitHub {event} on {repo}: {body}"}]}
                 )
+        elif event == "workflow_run":
+            # Live CI ingestion (research #3801): a failing GitHub Actions
+            # run on one of our feat/ branches flips the feature back to
+            # pending with a CI-specific heal_hint, so the healer routes
+            # the next attempt with the real CI failure in context — not
+            # just whatever our local verify_changes caught.
+            from .ci_ingest import handle_workflow_run
+            await handle_workflow_run(backlog, payload)
         return {"ok": True}
 
     return app

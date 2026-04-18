@@ -67,6 +67,17 @@ KANBAN_HTML = r"""<!doctype html>
   .reasons .reason { background: #0d1117; border: 1px solid var(--border); padding: 2px 8px; border-radius: 3px; }
   .reasons .reason b { color: var(--blocked); margin-right: 4px; }
   .age { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10; }
+  .modal { position: fixed; inset: 48px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; z-index: 11; padding: 20px; overflow: auto; }
+  .modal h2 { margin-top: 0; font-size: 14px; }
+  .modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .modal th, .modal td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-family: SFMono-Regular,Menlo,monospace; }
+  .modal th { color: var(--muted); font-weight: 500; }
+  .modal .rate { font-weight: 700; }
+  .modal .rate.low { color: var(--blocked); }
+  .modal .rate.high { color: var(--done); }
+  .modal .reasons { color: var(--muted); font-size: 11px; line-height: 1.4; }
+  .modal .close { position: absolute; top: 8px; right: 12px; background: transparent; color: var(--fg); border: 1px solid var(--border); padding: 4px 10px; border-radius: 3px; cursor: pointer; }
   .history-box { margin-top: 6px; padding: 6px 8px; background: #0a0d12; border-radius: 3px; font-size: 10px; color: var(--muted); border-left: 2px solid var(--impl); max-height: 160px; overflow: auto; }
   .history-box .row { margin: 0; padding: 2px 0; display: block; }
   .history-box .from-to { color: var(--fg); font-weight: 600; }
@@ -80,6 +91,7 @@ KANBAN_HTML = r"""<!doctype html>
       <input type="search" placeholder="filter id / name / repo..." x-model="filterText" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:12px;width:220px;" />
       <span class="meta" x-text="'refreshed ' + sinceLabel + 's ago'"></span>
       <button @click="refresh()">refresh</button>
+      <button @click="loadAnalytics()">analytics</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve all blocked</button>
     </div>
   </header>
@@ -153,12 +165,67 @@ KANBAN_HTML = r"""<!doctype html>
 
   <div class="toast" x-show="toast" x-text="toast" :class="toastErr ? 'err' : ''"></div>
 
+  <template x-if="analytics">
+    <div>
+      <div class="modal-backdrop" @click="analytics = null"></div>
+      <div class="modal">
+        <button class="close" @click="analytics = null">close</button>
+        <h2>
+          Prompt version analytics
+          <span style="color: var(--muted); font-weight: 400; font-size: 12px;">
+            (<span x-text="analytics.total_transitions"></span> transitions ·
+            best trusted: <span x-text="analytics.best_trusted_version || 'n/a'"></span>
+            <span x-show="analytics.best_trusted_done_rate !== null">
+              @ <span x-text="(analytics.best_trusted_done_rate * 100).toFixed(1) + '%'"></span>
+            </span>)
+          </span>
+        </h2>
+        <table>
+          <thead>
+            <tr>
+              <th>version</th>
+              <th>first_seen</th>
+              <th>last_seen</th>
+              <th>features</th>
+              <th>done</th>
+              <th>blocked</th>
+              <th>done_rate</th>
+              <th>top failure reasons</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="v in analytics.versions" :key="v.prompts_version">
+              <tr>
+                <td x-text="v.prompts_version"></td>
+                <td x-text="v.first_seen ? v.first_seen.slice(0, 16).replace('T', ' ') : '—'"></td>
+                <td x-text="v.last_seen ? v.last_seen.slice(0, 16).replace('T', ' ') : '—'"></td>
+                <td x-text="v.feature_count"></td>
+                <td x-text="v.terminal_done"></td>
+                <td x-text="v.terminal_blocked"></td>
+                <td>
+                  <span class="rate" :class="v.done_rate >= 0.75 ? 'high' : v.done_rate < 0.5 ? 'low' : ''" x-text="(v.done_rate * 100).toFixed(1) + '%'"></span>
+                  <span x-show="v.low_confidence" style="color: var(--muted); font-size: 10px;"> (n&lt;10)</span>
+                </td>
+                <td class="reasons">
+                  <template x-for="r in v.top_reasons" :key="r.reason">
+                    <div><b x-text="r.count"></b> <span x-text="r.reason"></span></div>
+                  </template>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </template>
+
 <script>
 function kanban() {
   return {
     features: [],
     stats: null,
     history: {},
+    analytics: null,
     filterText: '',
     toast: '',
     toastErr: false,
@@ -205,6 +272,15 @@ function kanban() {
       if (!iso) return '';
       const d = new Date(iso);
       return d.toISOString().slice(5, 16).replace('T', ' ');
+    },
+    async loadAnalytics() {
+      try {
+        const r = await fetch('/prompt-analytics');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.analytics = await r.json();
+      } catch (e) {
+        this.flash('analytics fetch failed: ' + e.message, true);
+      }
     },
     async toggleHistory(id) {
       if (this.history[id]) {
