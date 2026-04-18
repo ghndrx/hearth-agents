@@ -8,6 +8,7 @@ on Ctrl-C and on container shutdown.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import uvicorn
 
@@ -50,22 +51,37 @@ async def _main() -> None:
     # Expose fallback_agent on app.state so endpoints (e.g. /debate) can
     # reach the second model without reaching into module-level globals.
     app.state.fallback_agent = fallback_agent
+    # Background-task registry for /admin/restart-task. Each entry is
+    # (current_task, factory_callable) so the endpoint can cancel and
+    # re-spawn from the same factory.
+    factories = {
+        "loop": lambda: run_forever(backlog, agent, fallback_agent=fallback_agent),
+        "bot": lambda: run_bot(backlog, agent),
+        "idea_engine": lambda: run_idea_engine(backlog),
+        "healer": lambda: run_healer(backlog),
+        "worktree_gc": lambda: run_worktree_gc(backlog),
+        "digest": lambda: run_digest(backlog),
+        "drift_alarm": lambda: run_drift_alarm(),
+        "archive": lambda: run_archive(backlog),
+        "scheduler": lambda: run_scheduler(backlog),
+        "stuck_feature_escalator": lambda: run_stuck_feature_escalator(backlog),
+        "self_improvement_seeder": lambda: run_self_improvement_seeder(backlog),
+        "snapshot": lambda: run_snapshot(backlog),
+    }
+    bg_tasks: dict[str, tuple[asyncio.Task, Any]] = {}
+    for name, factory in factories.items():
+        t = asyncio.create_task(factory())
+        bg_tasks[name] = (t, factory)
+    app.state.background_tasks = bg_tasks
     log.info("starting", port=settings.server_port, stats=backlog.stats())
 
+    # gather() the server alongside the registered background tasks; each
+    # task's lifecycle is owned by the registry so /admin/restart-task can
+    # replace any of them without disturbing the others.
     await asyncio.gather(
         _serve(app),
-        run_forever(backlog, agent, fallback_agent=fallback_agent),
-        run_bot(backlog, agent),
-        run_idea_engine(backlog),
-        run_healer(backlog),
-        run_worktree_gc(backlog),
-        run_digest(backlog),
-        run_drift_alarm(),
-        run_archive(backlog),
-        run_scheduler(backlog),
-        run_stuck_feature_escalator(backlog),
-        run_self_improvement_seeder(backlog),
-        run_snapshot(backlog),
+        *[entry[0] for entry in bg_tasks.values()],
+        return_exceptions=True,
     )
 
 

@@ -137,7 +137,9 @@ async def run_worktree_gc(backlog: Backlog) -> None:
         done_retention_h=DONE_RETENTION_SEC // 3600,
         blocked_retention_h=BLOCKED_RETENTION_SEC // 3600,
     )
+    from .heartbeat import beat
     while True:
+        beat("worktree_gc")
         try:
             counts = await _sweep_once(backlog)
             if counts["removed_done"] + counts["removed_blocked"] > 0:

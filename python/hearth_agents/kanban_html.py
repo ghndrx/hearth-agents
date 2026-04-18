@@ -114,6 +114,7 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="openAddModal()" style="background: var(--done); color: #fff; border-color: var(--done);">+ add</button>
       <button @click="loadAnalytics()">analytics</button>
       <button @click="loadSchedule()">schedule</button>
+      <button @click="loadDepGraph()">dep graph</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve blocked</button>
       <button :disabled="!escalatedFeatures.length" @click="bulkRetryEscalated()" title="Reset heal_attempts and re-queue every escalated feature">retry escalated</button>
     </div>
@@ -203,6 +204,50 @@ KANBAN_HTML = r"""<!doctype html>
   </div>
 
   <div class="toast" x-show="toast" x-text="toast" :class="toastErr ? 'err' : ''"></div>
+
+  <template x-if="depGraph !== null">
+    <div>
+      <div class="modal-backdrop" @click="depGraph = null"></div>
+      <div class="modal" style="inset: 5%;">
+        <button class="close" @click="depGraph = null">close</button>
+        <h2>Feature dependency graph
+          <span style="color: var(--muted); font-weight: 400; font-size: 12px;">
+            (<span x-text="depGraph.nodes.length"></span> linked nodes ·
+            <span x-text="depGraph.edges.length"></span> edges)
+          </span>
+        </h2>
+        <p style="color: var(--muted); font-size: 11px;">
+          Each row shows a feature and what it depends on. Red ID = blocked by an unfinished dep. Standalone features (no deps and not depended-on) are hidden.
+        </p>
+        <table>
+          <thead>
+            <tr><th>feature</th><th>status</th><th>depends on</th><th>depended on by</th></tr>
+          </thead>
+          <tbody>
+            <template x-for="n in depGraph.nodes" :key="n.id">
+              <tr>
+                <td>
+                  <span :style="n.blocked_by_deps ? 'color: var(--blocked); font-weight: 700;' : ''" x-text="n.id"></span>
+                  <div style="color: var(--muted); font-size: 10px;" x-text="n.name"></div>
+                </td>
+                <td><span class="repo" x-text="n.status"></span></td>
+                <td>
+                  <template x-for="e in depGraph.edges.filter(x => x.to === n.id)" :key="'i-' + e.from + '-' + e.to">
+                    <span class="repo" style="background:#3d2810;color:#d29922;" x-text="e.from"></span>
+                  </template>
+                </td>
+                <td>
+                  <template x-for="e in depGraph.edges.filter(x => x.from === n.id)" :key="'o-' + e.from + '-' + e.to">
+                    <span class="repo" style="background:#0e3a5b;color:#79c0ff;" x-text="e.to"></span>
+                  </template>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </template>
 
   <template x-if="schedule !== null">
     <div>
@@ -328,6 +373,7 @@ function kanban() {
     schedule: null,
     scheduleJson: '',
     scheduleStatus: '',
+    depGraph: null,
     filterText: '',
     kindFilter: '',
     riskFilter: '',
@@ -447,6 +493,15 @@ function kanban() {
         await this.refresh();
       } catch (e) {
         this.flash('fresh-retry failed: ' + e.message, true);
+      }
+    },
+    async loadDepGraph() {
+      try {
+        const r = await fetch('/dep-graph');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.depGraph = await r.json();
+      } catch (e) {
+        this.flash('dep-graph fetch failed: ' + e.message, true);
       }
     },
     async loadSchedule() {

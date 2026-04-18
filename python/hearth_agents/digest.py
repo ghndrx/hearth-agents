@@ -24,12 +24,14 @@ DIGEST_INTERVAL_SEC = 24 * 60 * 60  # 24h rollup
 
 async def run_digest(backlog: Backlog) -> None:
     """Background task: emit a 24h summary to Telegram daily."""
+    from .heartbeat import beat
     notifier = Notifier()
     # Wait one interval before the first digest so a restart storm doesn't
     # ping multiple times. The operator can always hit /stats for on-demand.
     await asyncio.sleep(DIGEST_INTERVAL_SEC)
     try:
         while True:
+            beat("digest")
             try:
                 msg = _compose_digest(backlog)
                 await notifier.send(msg)

@@ -328,8 +328,10 @@ async def run_idea_engine(backlog: Backlog) -> None:
         reviewer=bool(reviewer),
         product_features_enabled=settings.product_features_enabled,
     )
+    from .heartbeat import beat
     try:
         while True:
+            beat("idea_engine")
             # Skip product generation when the platform is scoped to self-improvement
             # only. The agent still works on existing product features in the
             # backlog and on self-improvements; we just stop ADDING new product

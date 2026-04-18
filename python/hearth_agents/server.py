@@ -10,6 +10,7 @@ import hashlib
 import hmac
 from typing import Any
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -61,14 +62,34 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         }
 
     @app.get("/features")
-    async def list_features(status: str | None = None) -> list[dict[str, Any]]:
+    async def list_features(
+        status: str | None = None,
+        q: str | None = None,
+        kind: str | None = None,
+    ) -> list[dict[str, Any]]:
         """All features (or a single status slice) as lightweight dicts for
         the kanban UI. Ordered by last activity (updated_at desc) so the
-        board top is the currently-moving work, not the oldest-birthday."""
+        board top is the currently-moving work, not the oldest-birthday.
+
+        ``q`` is a case-insensitive substring filter against id, name,
+        description, and any heal_hint. ``kind`` is exact-match. Both
+        compose with ``status``.
+        """
         from .transitions import read_tail
         features = backlog.features
         if status:
             features = [f for f in features if f.status == status]
+        if kind:
+            features = [f for f in features if f.kind == kind]
+        if q:
+            ql = q.lower()
+            features = [
+                f for f in features
+                if ql in (f.id or "").lower()
+                or ql in (f.name or "").lower()
+                or ql in (f.description or "").lower()
+                or ql in (f.heal_hint or "").lower()
+            ]
         # Build feature_id → latest transition ts map in one pass — avoids
         # the O(features × transitions) read that a naive to_dict()
         # would cause. read_tail returns chronological order, so the
@@ -470,6 +491,39 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         except (OSError, _json.JSONDecodeError):
             return []
 
+    @app.get("/schedule/preview")
+    async def schedule_preview() -> list[dict[str, Any]]:
+        """Show next-fire timestamp and time-until-fire for each schedule
+        entry. Useful before saving an edit — confirm "weekly dep audit
+        will fire next at <T>" without waiting for the 60s scheduler tick."""
+        import json as _json
+        import time as _t
+        from pathlib import Path as _P
+        path = _P("/data/schedule.json")
+        if not path.exists():
+            return []
+        try:
+            entries = _json.loads(path.read_text())
+        except (OSError, _json.JSONDecodeError):
+            return []
+        now = _t.time()
+        preview: list[dict[str, Any]] = []
+        for e in entries if isinstance(entries, list) else []:
+            if not isinstance(e, dict):
+                continue
+            every = float(e.get("every_hours") or 0)
+            last = float(e.get("last_fire_ts") or 0)
+            next_fire = last + every * 3600 if last > 0 else now
+            preview.append({
+                "name": e.get("name", ""),
+                "every_hours": every,
+                "last_fire_ts": last,
+                "next_fire_ts": next_fire,
+                "fires_in_sec": max(0, int(next_fire - now)),
+                "feature_id_prefix": (e.get("feature") or {}).get("id_prefix", ""),
+            })
+        return sorted(preview, key=lambda p: p["fires_in_sec"])
+
     @app.put("/schedule")
     async def schedule_replace(payload: list[dict[str, Any]]) -> dict[str, Any]:
         """Overwrite /data/schedule.json. Scheduler re-reads every 60s so
@@ -654,6 +708,55 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "circuit_breaker": circuit_state(),
             "workers": watchdog_state(),
         }
+
+    @app.get("/dep-graph")
+    async def dep_graph() -> dict[str, Any]:
+        """Return the feature dependency graph as nodes + edges, suitable
+        for client-side rendering. Only includes features with deps OR
+        features that are deps of others — drops the sea of standalone
+        cards that would clutter the visualization."""
+        edges: list[dict[str, str]] = []
+        depended_on: set[str] = set()
+        for f in backlog.features:
+            for d in f.depends_on or []:
+                edges.append({"from": d, "to": f.id})
+                depended_on.add(d)
+        relevant_ids = {e["from"] for e in edges} | {e["to"] for e in edges}
+        nodes = [
+            {
+                "id": f.id,
+                "name": f.name[:60],
+                "status": f.status,
+                "kind": f.kind,
+                "blocked_by_deps": bool(f.depends_on) and not all(
+                    any(g.id == d and g.status == "done" for g in backlog.features)
+                    for d in f.depends_on
+                ),
+            }
+            for f in backlog.features
+            if f.id in relevant_ids
+        ]
+        return {"nodes": nodes, "edges": edges}
+
+    @app.post("/admin/restart-task/{task_name}")
+    async def restart_task(task_name: str) -> dict[str, Any]:
+        """Re-spawn a wedged background task. Operator nudge — no full
+        process restart needed. Looks up the named task in app.state.background_tasks
+        (populated by main.py), cancels it if alive, then re-creates it
+        with the original coroutine factory."""
+        registry = getattr(app.state, "background_tasks", None)
+        if registry is None:
+            raise HTTPException(status_code=503, detail="background-task registry not wired yet")
+        entry = registry.get(task_name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown task '{task_name}'; known: {list(registry)}")
+        task, factory = entry
+        if not task.done():
+            task.cancel()
+        new_task = asyncio.create_task(factory())
+        registry[task_name] = (new_task, factory)
+        log.info("admin_task_restarted", task=task_name)
+        return {"ok": True, "task": task_name, "previous_done": task.done()}
 
     @app.post("/webhooks/alert")
     async def alert_webhook(request: Request) -> dict[str, Any]:
