@@ -18,6 +18,7 @@ from .config import settings
 from .archive_task import run_archive
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
+from .scheduler import run_scheduler
 from .gc_worktrees import run_worktree_gc
 from .healer import run_healer
 from .idea_engine import run_idea_engine
@@ -55,6 +56,7 @@ async def _main() -> None:
         run_digest(backlog),
         run_drift_alarm(),
         run_archive(backlog),
+        run_scheduler(backlog),
     )
 
 

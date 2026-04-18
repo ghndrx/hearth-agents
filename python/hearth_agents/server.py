@@ -225,6 +225,23 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from .prompt_analyzer import analyze
         return analyze()
 
+    @app.get("/replay/{feature_id}")
+    async def replay_endpoint(feature_id: str) -> dict[str, Any]:
+        """Read-only replay analytics for a feature: every recorded
+        attempt's tool-call sequence, pairwise diffs across attempts,
+        cost rollup. Foundation for full deterministic replay (research
+        #3807) which still requires Langfuse persistence."""
+        from .replay import replay
+        return replay(feature_id)
+
+    @app.get("/cost-analytics")
+    async def cost_analytics_endpoint() -> dict[str, Any]:
+        """Per-feature + daily + per-provider token cost rollup from
+        attempts.jsonl. Top 25 most-expensive features, last 30 days
+        of daily spend, provider split."""
+        from .cost_analytics import analyze_costs
+        return analyze_costs()
+
     @app.get("/repo-analytics")
     async def repo_analytics() -> dict[str, Any]:
         """Per-repo done-rate + block cluster. Answers 'is hearth-mobile

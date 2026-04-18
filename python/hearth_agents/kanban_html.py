@@ -158,6 +158,10 @@ KANBAN_HTML = r"""<!doctype html>
                 <a class="btn" :href="langfuseUrl(f.id)" target="_blank">trace</a>
                 <a class="btn" :href="ghBranchUrl(f)" target="_blank" x-show="f.status !== 'pending'">branch</a>
                 <button @click="toggleHistory(f.id)" x-text="history[f.id] ? 'hide history' : 'history'"></button>
+                <a class="btn" :href="'/replay/' + encodeURIComponent(f.id)" target="_blank">replay</a>
+                <template x-if="f.status === 'done'">
+                  <button @click="confirmCleanup(f)" title="Delete origin branch + local worktree">cleanup</button>
+                </template>
                 <button class="nuke" @click="confirmNuke(f)">nuke</button>
               </div>
               <template x-if="history[f.id]">
@@ -455,6 +459,10 @@ function kanban() {
     confirmNuke(f) {
       if (!confirm('Nuke ' + f.id + ' (' + f.name + ')? This removes it from the backlog.')) return;
       this.act(f.id, 'nuke');
+    },
+    confirmCleanup(f) {
+      if (!confirm('Delete origin branch feat/' + f.id + ' and any local worktree? Use after the PR is merged.')) return;
+      this.act(f.id, 'cleanup_branch');
     },
     langfuseUrl(featureId) {
       // Prefer the server-configured langfuse_public_url (from /config);

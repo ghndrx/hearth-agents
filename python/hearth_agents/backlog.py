@@ -392,6 +392,15 @@ class Backlog:
                 self.features.pop(i)
                 self.save()
                 return True, f"{feature_id} removed"
+            if action == "cleanup_branch":
+                # Delete the feature's feat/<id> branch on origin (and
+                # any remaining worktree). Useful after the PR merged
+                # and you don't want stale branches piling up. Doesn't
+                # touch the feature row itself; just hygiene.
+                from .gc_worktrees import delete_feature_branch_everywhere
+                summary = delete_feature_branch_everywhere(f)
+                record_transition(feature_id, f.status, f.status, reason=f"branch_cleanup: {summary}", actor="kanban")
+                return True, summary
             return False, f"unknown action: {action}"
         return False, f"feature not found: {feature_id}"
 

@@ -28,6 +28,43 @@ DONE_RETENTION_SEC = 6 * 60 * 60   # keep done worktrees for 6h (post-mortem win
 BLOCKED_RETENTION_SEC = 24 * 60 * 60  # keep blocked worktrees for 24h so humans can inspect
 
 
+def delete_feature_branch_everywhere(feature) -> str:  # type: ignore[no-untyped-def]
+    """Operator-triggered cleanup: delete the feat/<id> branch on origin
+    AND any local worktree for it across every repo the feature touches.
+    Best-effort, never raises. Returns a short summary for the kanban
+    transition log.
+    """
+    branch = f"feat/{feature.id}"
+    actions: list[str] = []
+    for repo_name in feature.repos:
+        repo_path = settings.repo_paths.get(repo_name)
+        if not repo_path:
+            continue
+        rp = Path(repo_path)
+        wt = rp.parent / f"worktrees-{rp.name}" / branch
+        if wt.exists():
+            ok = _remove_worktree(rp, wt)
+            actions.append(f"{repo_name}: worktree {'removed' if ok else 'remove-failed'}")
+        # Delete remote branch (origin) — agent's GITHUB_TOKEN auth via
+        # git_push tool's URL injection is set in the loop, but here we
+        # just call git push :branch which uses whatever auth the remote
+        # already has. If unauthenticated, this 401s and we log it.
+        try:
+            r = subprocess.run(
+                ["git", "push", "origin", "--delete", branch],
+                cwd=str(rp), capture_output=True, text=True, timeout=30, check=False,
+            )
+            if r.returncode == 0:
+                actions.append(f"{repo_name}: origin branch deleted")
+            else:
+                actions.append(f"{repo_name}: origin delete failed ({r.stderr[:80]})")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            actions.append(f"{repo_name}: origin delete error: {e}")
+        # Delete local branch ref (won't error if it doesn't exist).
+        subprocess.run(["git", "branch", "-D", branch], cwd=str(rp), capture_output=True, timeout=10, check=False)
+    return "; ".join(actions) or "no repos to clean"
+
+
 def _remove_worktree(repo_path: Path, worktree: Path) -> bool:
     """``git worktree remove`` with --force. Returns True on success."""
     try:
