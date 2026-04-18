@@ -19,6 +19,7 @@ from .archive_task import run_archive
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
 from .scheduler import run_scheduler
+from .self_improvement_seeder import run_self_improvement_seeder
 from .stuck_feature_escalator import run_stuck_feature_escalator
 from .gc_worktrees import run_worktree_gc
 from .healer import run_healer
@@ -59,6 +60,7 @@ async def _main() -> None:
         run_archive(backlog),
         run_scheduler(backlog),
         run_stuck_feature_escalator(backlog),
+        run_self_improvement_seeder(backlog),
     )
 
 

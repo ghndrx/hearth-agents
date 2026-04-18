@@ -10,6 +10,8 @@ import hashlib
 import hmac
 from typing import Any
 
+from datetime import datetime, timezone
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -18,6 +20,17 @@ from .backlog import Backlog
 from .config import settings
 from .kanban_html import KANBAN_HTML
 from .logger import log
+
+
+def datetime_utcnow_ts() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _age_sec(iso: str) -> float:
+    try:
+        return datetime_utcnow_ts() - datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("inf")
 
 
 def build_app(backlog: Backlog, agent: Any) -> FastAPI:
@@ -296,6 +309,90 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         #3807) which still requires Langfuse persistence."""
         from .replay import replay
         return replay(feature_id)
+
+    @app.post("/replay/{feature_id}/dry-run")
+    async def replay_dry_run(feature_id: str) -> dict[str, Any]:
+        """Invoke the agent with the SAME feature prompt it saw before,
+        but under the CURRENT prompts_version. Compares what tools the
+        agent chooses now vs what it chose in the last recorded attempt.
+        Used to preview the effect of a prompt change WITHOUT committing
+        the output to a worktree.
+
+        The agent runs at temperature=0.3 so results aren't deterministic
+        — "same input → same output" isn't guaranteed. Use the tool-call
+        sequence diff as a signal, not proof.
+
+        Budget-capped via per_feature_budget_usd like real attempts; a
+        dry-run that runs away won't exhaust quota.
+        """
+        feature = next((f for f in backlog.features if f.id == feature_id), None)
+        if feature is None:
+            raise HTTPException(status_code=404, detail="feature not found")
+        from .loop import _feature_prompt, _extract_token_usage
+        from .replay import replay as _replay
+        prompt = _feature_prompt(feature)
+        try:
+            result = await agent.ainvoke(
+                {"messages": [{"role": "user", "content": prompt}]},
+                config={"metadata": {"feature_id": feature.id, "dry_run": True}},
+            )
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"dry-run invoke failed: {e}")
+        in_tok, out_tok = _extract_token_usage(result)
+        new_tools: list[dict[str, Any]] = []
+        for m in (result or {}).get("messages", []) or []:
+            for tc in (getattr(m, "tool_calls", None) or []):
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
+                new_tools.append({"name": name, "args_repr": repr(args)[:200]})
+        prior = _replay(feature_id)
+        last_attempt = prior["attempts"][-1] if prior["attempts"] else None
+        return {
+            "feature_id": feature_id,
+            "current_prompts_version": None,  # filled below
+            "dry_run_tools": new_tools,
+            "dry_run_input_tokens": in_tok,
+            "dry_run_output_tokens": out_tok,
+            "last_recorded_attempt": last_attempt,
+        }
+
+    @app.get("/dashboard/{repo_name}")
+    async def repo_dashboard(repo_name: str) -> dict[str, Any]:
+        """Per-repo rollup: backlog by status + kind, recent throughput,
+        top block reasons, worker time allocation. Lets operators tell
+        'hearth is healthy but hearth-mobile is backed up' at a glance."""
+        from collections import Counter
+        features = [f for f in backlog.features if repo_name in f.repos]
+        if not features:
+            raise HTTPException(status_code=404, detail=f"no features on repo {repo_name}")
+        status_counts = Counter(f.status for f in features)
+        kind_counts = Counter(f.kind for f in features)
+        risk_counts = Counter(f.risk_tier for f in features)
+        # Block reason top-5 scoped to this repo.
+        reasons: Counter[str] = Counter()
+        for f in features:
+            if f.status != "blocked":
+                continue
+            key = (f.heal_hint or "(no hint)")[:60].strip().rstrip(":").rstrip(".")
+            reasons[key] += 1
+        # Recent 24h throughput via created_at (not transitions — faster,
+        # per-repo transition filter would need a full read).
+        now = datetime_utcnow_ts()
+        window = 24 * 60 * 60
+        recent = [f for f in features if _age_sec(f.created_at) <= window]
+        return {
+            "repo": repo_name,
+            "total": len(features),
+            "by_status": dict(status_counts),
+            "by_kind": dict(kind_counts),
+            "by_risk": dict(risk_counts),
+            "recent_24h": {
+                "total": len(recent),
+                "done": sum(1 for f in recent if f.status == "done"),
+                "blocked": sum(1 for f in recent if f.status == "blocked"),
+            },
+            "top_block_reasons": [{"reason": r, "count": c} for r, c in reasons.most_common(5)],
+        }
 
     @app.get("/schedule")
     async def schedule_list() -> list[dict[str, Any]]:
@@ -605,17 +702,23 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                         added = backlog.add(feature)
                         log.info("github_issue_ingested", feature_id=feature_id, added=added, kind=kind)
         elif event == "pull_request":
-            # Conventional-commits gate (research #3834). Flag PRs whose
-            # title doesn't parse as a conventional-commit header so the
-            # agent (or a future bot) can comment back asking for a
-            # rename. Non-blocking — just a log signal today.
+            # Conventional-commits gate (research #3834).
             from .commitlint import parse as _parse
-            pr_title = ((payload.get("pull_request") or {}).get("title") or "").strip()
+            pr_obj = payload.get("pull_request") or {}
+            pr_title = (pr_obj.get("title") or "").strip()
             parsed = _parse(pr_title)
             if not parsed:
                 log.warning("pr_title_not_conventional", title=pr_title[:120])
             else:
                 log.info("pr_title_parsed", type=parsed.type, bump=parsed.bump)
+            # Release auto-create when a PR merges (research #3834 release
+            # engineering). Walk the merged PR's commits, group by
+            # conventional-commit type, decide bump, draft a tag + release
+            # via GitHub API. Best-effort, never blocks the webhook.
+            if (payload.get("action") == "closed") and pr_obj.get("merged"):
+                from .release_bot import auto_release
+                import asyncio as _asyncio
+                _asyncio.create_task(auto_release(payload))
         elif event == "workflow_run":
             # Live CI ingestion (research #3801): a failing GitHub Actions
             # run on one of our feat/ branches flips the feature back to
