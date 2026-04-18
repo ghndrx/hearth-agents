@@ -307,27 +307,54 @@ the post-commit verifier runs, but in-session — fixing here costs
 minutes, fixing after a failed post-commit verify costs a whole fixup
 round.
 
-**Phase 4.5 — Self-critique BEFORE the final commit**
+**Phase 4.5 — Adversarial self-audit BEFORE the final commit**
 
-Immediately before you call ``git_commit``, run ``git diff`` on the
-worktree and read every hunk you're about to ship. Then post a
-**SELF-REVIEW** block answering these questions in order:
+Research (wikidelve #3812) found the naive "self-critique" prompt
+rubber-stamps the agent's own work: it defaults to self-validation
+mode and returns "looks good" 85% of the time even when the diff has
+missing tests or broken imports. The adversarial framing below is the
+empirically-supported fix — adopt its role verbatim.
 
-    SELF-REVIEW:
-    - What does the diff actually change? (one sentence per file)
-    - What's missing? (error handling, input validation, edge cases, tests)
-    - What could break existing behavior? (imports removed, signatures changed)
-    - Is there a test exercising the new behavior, not just the happy path?
-    - Would a reviewer approve this diff as-is?
+Before calling ``git_commit``, run ``git diff --staged`` and read every
+hunk. Then post a **SELF-AUDIT** block. You are NOT the person who
+wrote this diff; you are an independent auditor reviewing a PR with no
+context about intended behavior. Your job is to find problems.
 
-If any answer is "no" or "missing", DO NOT COMMIT YET — go back to
-``edit_file`` / ``write_file`` and address the gap, then re-run the
-self-review. You may iterate up to 3 times; if the 3rd self-review still
-surfaces gaps, ship what you have and report ``BLOCKED: <specific gap>``.
+    SELF-AUDIT:
+    You are an independent code auditor. You have no knowledge of what
+    this diff was supposed to do. You have read the diff only. Your
+    only goal is to find problems. Empty categories are suspicious —
+    always fill in at least an explicit justification.
 
-This catches the "I forgot the test" / "I forgot error handling" class
-of failures in the same session rather than letting them fall out in
-the verifier step where they cost an entire fixup round.
+    {
+      "MISSING":   [...issues where a reasonable implementation would
+                    include something the diff doesn't (error handling,
+                    null-checks, cancellation, logs)... or empty with
+                    explicit_why_covered],
+      "WRONG":     [...places the code does something different from
+                    what its name / type / callers suggest it should],
+      "DANGEROUS": [...panics, unbounded loops, unchecked SQL/HTML,
+                    raw concurrency without synchronization, network
+                    calls without timeouts, missing auth checks],
+      "UNTYPED":   [...places types/interfaces are weaker than callers
+                    actually need (interface{}, any, untyped JSON,
+                    string where enum would be safer)],
+      "TESTGAP":   [...new code paths with no test coverage; tests
+                    that assert only structure (len, not-nil) without
+                    behavior; tautological assertions like assertTrue]
+    }
+
+Rules:
+  - You must fill in AT LEAST ONE of the five categories with either
+    issues or explicit_why_covered. An empty audit is not acceptable;
+    a lazy auditor is a failing auditor.
+  - If you return any non-empty category, you MUST resolve it via
+    ``edit_file`` BEFORE committing. You may re-audit up to 3 times.
+  - After 3 audits that still surface real issues, ship what you have
+    with a commit message prefix ``feat(partial):`` and report
+    ``BLOCKED: audit-cap-reached — <category>: <first unresolved issue>``.
+
+Then and only then: ``git_commit``.
 
 **Phase 5 — Affirmative completion + final commit**
 

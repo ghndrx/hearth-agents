@@ -25,9 +25,14 @@ from .verify import verify_changes
 LOOP_INTERVAL_SEC = 30
 
 
-def _rescue_uncommitted_worktrees(feature: Feature) -> None:
+def _rescue_uncommitted_worktrees(feature: Feature) -> bool:
     """If the agent edited files in a feature worktree but never committed
     them, auto-commit now so the iterate loop has something real to verify.
+
+    Returns True when rescue actually committed something, False otherwise.
+    Callers pass that signal into the transition reason so operators can
+    tell which features survived via auto-commit vs proper agent commit
+    (research #3810 prescribes this distinction for post-hoc analysis).
 
     Root cause being fixed: Kimi + DeepAgents reliably falls into
     read-explore-abandon spirals on some features — it makes legitimate
@@ -41,6 +46,7 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
     """
     import subprocess
     from pathlib import Path as _P
+    did_commit = False
     branch = f"feat/{feature.id}"
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -88,6 +94,7 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
             if commit.returncode != 0:
                 log.warning("rescue_commit_failed", feature=feature.id, err=commit.stderr[:200])
                 continue
+            did_commit = True
             push = subprocess.run(
                 ["git", "push", "-u", "origin", "HEAD"],
                 cwd=str(wt), capture_output=True, text=True, timeout=60, check=False,
@@ -100,6 +107,7 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             log.warning("rescue_failed", feature=feature.id, err=str(e)[:200])
+    return did_commit
 
 
 def _agent_self_reports_blocked(text: str) -> bool:
@@ -598,38 +606,57 @@ async def run_once(
     MAX_FIXUPS = settings.max_fixups
 
     def _detect_exploratory_spiral(messages: list) -> str | None:
-        """Post-ainvoke check: did the agent burn the session on reads with
-        no writes? Returns a reason string when a spiral is detected, else
-        None. Spirals are a top-3 timeout cause — we want to surface them
-        as their own block reason so the next-attempt prompt can give
-        targeted "stop reading, start writing" guidance.
+        """Post-ainvoke check: did the agent waste the session on stuck
+        patterns? Returns a reason string when a spiral is detected, else
+        None. Research #3811 (real-time-stuck-state-detection) recommends
+        three signals, all implemented here:
 
-        Heuristic: count tool calls in AIMessage.tool_calls; flag when
-        reads/shell >= 6 AND writes == 0, or when the SAME file is read
-        3+ times in a row (classic re-reading-for-no-reason pattern).
+        1. IDENTICAL-CONSECUTIVE: same tool+args hashed 3+ times in a row
+           (Kimi/MiniMax-tuned threshold; research says drop by 1-2 vs GPT-4).
+        2. A-B-A-B OSCILLATION: pattern [X, Y, X, Y] with the same two
+           hashes alternating 4+ times — classic re-read-then-re-read cycle.
+        3. READ-ONLY SPIRAL: ≥6 reads with 0 writes (original heuristic,
+           kept for backwards compat).
+
+        Tool calls are fingerprinted as sha256(name + sorted-json args)[:12]
+        so arg-identical calls match even when argument order drifts.
         """
+        import hashlib
+        import json as _json
         reads = 0
         writes = 0
-        shell = 0
-        last_read: list[str] = []
+        fingerprints: list[str] = []
+
+        def _fp(name: str, args: dict) -> str:
+            try:
+                blob = name + _json.dumps(args or {}, sort_keys=True, default=str)[:500]
+            except (TypeError, ValueError):
+                blob = name + repr(args)[:500]
+            return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
         for m in messages or []:
             tcs = getattr(m, "tool_calls", None) or []
             for tc in tcs:
                 name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
                 args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
-                path = (args or {}).get("file_path") or (args or {}).get("path") or ""
+                fingerprints.append(_fp(name, args))
                 if name in ("read_file", "repo_search", "git_status"):
                     reads += 1
-                    last_read.append(path)
-                    last_read = last_read[-3:]
-                    if len(last_read) == 3 and last_read[0] == last_read[1] == last_read[2] == path and path:
-                        return f"exploratory_spiral: read {path} 3x in a row"
-                elif name in ("write_file", "edit_file", "git_commit"):
+                elif name in ("write_file", "edit_file", "git_commit", "scaffold_test_file"):
                     writes += 1
-                elif name == "run_command":
-                    shell += 1
+
+        # 1. Identical-consecutive (threshold 3 for Kimi/MiniMax).
+        for i in range(len(fingerprints) - 2):
+            if fingerprints[i] == fingerprints[i + 1] == fingerprints[i + 2]:
+                return f"exploratory_spiral: identical tool call 3x in a row ({fingerprints[i]})"
+        # 2. A-B-A-B oscillation (threshold 4 alternations of same two hashes).
+        for i in range(len(fingerprints) - 3):
+            a, b, c, d = fingerprints[i], fingerprints[i + 1], fingerprints[i + 2], fingerprints[i + 3]
+            if a == c and b == d and a != b:
+                return f"exploratory_spiral: A-B-A-B oscillation between {a[:6]} and {b[:6]}"
+        # 3. Read-only spiral (original heuristic).
         if reads >= 6 and writes == 0:
-            return f"exploratory_spiral: {reads} reads, {shell} shell, 0 writes"
+            return f"exploratory_spiral: {reads} reads, 0 writes"
         return None
     FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff", "exploratory_spiral")
     # Patterns inside the verifier reason or test output that signal the
@@ -676,6 +703,10 @@ async def run_once(
             )
             _beat(worker_id, feature.id)
             _note_request(active_provider)
+            # Reset the per-attempt rescue flag so we know whether
+            # THIS attempt needed auto-commit or the agent committed
+            # on its own (research #3810's audit signal).
+            attempt_rescued = False
             result = await asyncio.wait_for(
                 active.ainvoke(
                     {"messages": [{"role": "user", "content": prompt}]},
@@ -699,7 +730,7 @@ async def run_once(
             # never committed, auto-commit them now so the iterate loop has
             # something to verify. Turns the dominant "no commits" failure
             # mode into a recoverable "tests maybe fail" one.
-            _rescue_uncommitted_worktrees(feature)
+            attempt_rescued = _rescue_uncommitted_worktrees(feature)
             ok, reason = verify_changes(feature)
             # Overlay stuck-state detection ONLY when verify fails — a
             # spiral that still produced passing diff + tests is a success.
@@ -737,7 +768,12 @@ async def run_once(
             # In-loop retries are transient — only log them. The final
             # feature_end notification will include "attempts=N" if it matters.
 
-        backlog.set_status(feature.id, verdict)
+        # Prepend a rescue-signal tag so transitions.jsonl can distinguish
+        # features that the agent committed itself from features that only
+        # landed because _rescue_uncommitted_worktrees auto-committed
+        # their stray diff. Rubber-stamping ratio is a useful diagnostic.
+        status_reason = (f"rescued={attempt_rescued} " if attempt_rescued else "") + (reason or "")
+        backlog.set_status(feature.id, verdict, reason=status_reason[:500])
         _record_verdict(verdict, provider=active_provider)
         if verdict == "done":
             # Clear the heal hint so future re-runs (idea engine duplicates,
