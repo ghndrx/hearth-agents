@@ -95,8 +95,11 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         if desc_sres.rejected:
             raise HTTPException(status_code=400, detail=f"description rejected: {desc_sres.reject_reason}")
         kind = payload.get("kind") or "feature"
-        if kind not in ("feature", "bug"):
-            raise HTTPException(status_code=400, detail="kind must be 'feature' or 'bug'")
+        if kind not in ("feature", "bug", "refactor", "schema", "security"):
+            raise HTTPException(
+                status_code=400,
+                detail="kind must be feature|bug|refactor|schema|security",
+            )
         if kind == "bug" and not (payload.get("repro_command") or "").strip():
             raise HTTPException(status_code=400, detail="bug requires repro_command")
         priority = payload.get("priority") or "medium"

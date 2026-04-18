@@ -14,7 +14,7 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
-Kind = Literal["feature", "bug"]
+Kind = Literal["feature", "bug", "refactor", "schema", "security"]
 
 
 def _norm_name(name: str) -> str:

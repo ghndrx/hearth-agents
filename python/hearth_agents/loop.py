@@ -677,6 +677,39 @@ def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
     resume_block = _resume_context(feature)
 
     if fixup:
+        # Breaking-change prompt (research #3828 Byam template): when the
+        # failure reason contains SYMBOL_UNRESOLVED AND the worktree diff
+        # touched a lock/manifest file, this is almost certainly a
+        # post-bump API break. Re-prompt with minimal-fix framing rather
+        # than generic "try again."
+        is_breaking_change = (
+            "SYMBOL_UNRESOLVED" in fixup or "undefined:" in fixup
+            or "Cannot find name" in fixup or "ModuleNotFoundError" in fixup
+        )
+        if is_breaking_change:
+            return f"""Breaking-change fix for feature ``{feature.id}``.
+
+A dependency bump introduced API calls that no longer resolve. The
+verifier output below shows the specific file:line and compile error.
+Fix strategy — ONLY these:
+
+  1. Read the actual new version's docs/source to find the replacement
+     API. DO NOT regenerate the same made-up name under a different
+     import path.
+  2. Apply the MINIMAL fix: change the import or call site, nothing else.
+     Do not refactor unrelated code in the same commit.
+  3. Preserve existing functionality exactly — the bump is an upgrade,
+     not a redesign.
+  4. Run ``verify_staged`` before committing; iterate if still red.
+
+Verifier output:
+{fixup}
+
+Target repos: {repos}
+Repo paths:
+{repo_paths}
+{resume_block}{conventions_block}"""
+
         return f"""Your previous attempt at feature ``{feature.id}`` failed verification.
 
 Reason: {fixup}
@@ -689,6 +722,52 @@ Target repos: {repos}
 Repo paths:
 {repo_paths}
 {resume_block}{conventions_block}"""
+
+    # Refactor-kind features: characterize-first (research #3832). Before
+    # touching production code, pin existing behavior with characterization
+    # tests. If the behavior can't be pinned in 2 attempts, escalate as
+    # CHARACTERIZATION_IMPOSSIBLE (rewrite candidate, not refactor).
+    if feature.kind == "refactor":
+        accept = feature.acceptance_criteria or "characterization tests still pass after refactor"
+        return f"""Refactor task ``{feature.id}``.
+{resume_block}
+Name: {feature.name}
+Priority: {feature.priority}
+Target repos: {repos}
+
+Repo paths on disk:
+{repo_paths}
+
+What to refactor:
+{feature.description}
+
+Acceptance:
+  {accept}
+
+Refactor workflow (follow in order — NO SHORTCUTS):
+
+  Phase A — Characterize current behavior:
+    1. Read the code being refactored. Identify the externally-visible
+       contract (public functions, API endpoints, CLI output, etc.).
+    2. Use ``scaffold_test_file`` to create a characterization test per
+       contract point. These tests pin CURRENT behavior, even quirky
+       behavior — don't fix bugs here, just capture what exists.
+    3. Run tests; they MUST pass green against the un-refactored code
+       before you proceed. If you can't get them green in 2 rounds,
+       stop and report ``BLOCKED: CHARACTERIZATION_IMPOSSIBLE — this
+       code needs a rewrite, not a refactor``.
+
+  Phase B — Refactor inside the seams:
+    1. Change the internals only. Characterization tests stay unchanged.
+    2. If a characterization test starts failing, you've broken behavior
+       — revert and rethink, don't "fix" the test.
+    3. Commit in small increments so each one can be bisected.
+
+  Phase C — Self-audit + commit as normal (Phase 4.5 applies).
+
+Research topics:
+  - {research}
+{memory_prefix}{conventions_block}"""
 
     # Bug features run a reproduce-first workflow (research #3803). The
     # developer must see repro_command fail BEFORE writing any fix code —

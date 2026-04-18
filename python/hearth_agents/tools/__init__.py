@@ -8,9 +8,12 @@ from .git_ops import (
     git_worktree_add,
     git_worktree_remove,
 )
+from .classify_bump import classify_bump
+from .env_profile import env_profile
 from .planner_tools import record_planner_estimate
 from .repo_search import repo_reindex, repo_search
 from .scaffold import scaffold_test_file
+from .scaffold_migration import scaffold_migration
 from .serper import web_search
 from .shell import run_command
 from .verify_staged import verify_staged
@@ -40,5 +43,8 @@ __all__ = [
     "git_worktree_remove",
     "record_planner_estimate",
     "scaffold_test_file",
+    "scaffold_migration",
     "verify_staged",
+    "classify_bump",
+    "env_profile",
 ]
