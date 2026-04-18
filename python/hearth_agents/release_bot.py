@@ -123,8 +123,53 @@ async def auto_release(payload: dict[str, Any]) -> None:
         if r.status_code in (200, 201):
             url = (r.json() or {}).get("html_url", "")
             log.info("release_bot_created", repo=repo, tag=new_tag, bump=bump, url=url)
+            # Enqueue a docs-regen Feature (research #3842) so the
+            # release has fresh README / API docs on disk. Runs
+            # asynchronously; doesn't block or gate the release.
+            _enqueue_docs_regen(repo, new_tag, merge_sha)
         elif r.status_code == 422:
             # Tag already exists — common when re-firing the webhook.
             log.info("release_bot_tag_exists", repo=repo, tag=new_tag)
         else:
             log.warning("release_bot_unexpected", status=r.status_code, body=r.text[:200])
+
+
+def _enqueue_docs_regen(repo: str, tag: str, merge_sha: str) -> None:
+    """Fire-and-forget HTTP POST to our own /features endpoint queuing
+    a docs-regen task. Stable id per (repo, tag) so re-fires dedupe."""
+    try:
+        import urllib.request
+        import json as _json
+        import hashlib
+        fid = f"docs-regen-{repo}-{hashlib.sha256((tag + merge_sha).encode()).hexdigest()[:8]}"
+        body = {
+            "id": fid,
+            "name": f"Regenerate docs for {repo} @ {tag}",
+            "description": (
+                f"Release {tag} just shipped on {repo} (merge {merge_sha[:8]}). "
+                "Regenerate README and API docs from current route signatures + "
+                "docstrings. Detect stale references to deprecated/removed APIs "
+                "and fix them in-place. Commit with ``docs: regen for " + tag + "``."
+            ),
+            "priority": "medium",
+            "repos": [repo],
+            "kind": "feature",
+            "acceptance_criteria": (
+                "README and API docs reflect current code; no dangling links "
+                "or references to deleted symbols; docs-regen commit pushed."
+            ),
+        }
+        from .config import settings as _s
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{_s.server_port}/features",
+            data=_json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10).read()
+            log.info("docs_regen_enqueued", feature_id=fid, tag=tag)
+        except Exception as e:  # noqa: BLE001
+            log.warning("docs_regen_enqueue_failed", err=str(e)[:160])
+    except Exception as e:  # noqa: BLE001
+        log.warning("docs_regen_setup_failed", err=str(e)[:160])

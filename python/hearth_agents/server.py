@@ -926,6 +926,61 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         log.info("admin_task_restarted", task=task_name)
         return {"ok": True, "task": task_name, "previous_done": task.done()}
 
+    @app.post("/webhooks/figma")
+    async def figma_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+        """Figma → Feature ingest (research #3837). Expects a Figma
+        file-update webhook payload OR a hand-crafted body with
+        {file_key, component_name, description, repo?}.
+
+        Emits a kind=feature Feature with the Figma file URL embedded
+        in the description so the developer can pull the node tree via
+        the Figma REST API during implementation. Keeps this module
+        free of Figma-API credentials — the operator configures the
+        developer side with FIGMA_TOKEN when they want to enable
+        actual pixel-extraction.
+        """
+        from .backlog import Feature
+        from .sanitize import sanitize as _sanitize
+        file_key = (payload.get("file_key") or payload.get("fileKey") or "").strip()
+        component = (payload.get("component_name") or payload.get("componentName") or "").strip()
+        description = (payload.get("description") or "").strip()
+        if not file_key:
+            raise HTTPException(status_code=400, detail="file_key required")
+        repo = payload.get("repo") or "hearth"
+        import hashlib
+        fid = f"figma-{hashlib.sha256((file_key + component).encode()).hexdigest()[:10]}"
+        body_text = (
+            f"Figma design to implement.\n\n"
+            f"File: https://www.figma.com/file/{file_key}\n"
+            f"Component: {component or '(whole file)'}\n\n"
+            f"Description: {description or '(none)'}\n\n"
+            "Fetch the node tree via the Figma REST API "
+            "(GET /v1/files/{file_key}/nodes?ids=...), extract tokens "
+            "(colors, typography, spacing), and emit framework-appropriate "
+            "components. Match pixel-level where practical; keyboard + "
+            "screen-reader affordances are non-negotiable. Run a11y_audit "
+            "on the built output before committing."
+        )
+        sres = _sanitize(body_text, provenance=f"figma:{file_key}")
+        if sres.rejected:
+            raise HTTPException(status_code=400, detail=f"description rejected: {sres.reject_reason}")
+        feature = Feature(
+            id=fid,
+            name=f"Figma: {component or file_key[:20]}",
+            description=sres.safe_text,
+            priority="medium",
+            repos=[repo],  # type: ignore[list-item]
+            kind="feature",
+            acceptance_criteria=(
+                "Implemented component matches the Figma node tree "
+                "(tokens, spacing, variants); a11y_audit is clean; "
+                "Storybook or Ladle entry exists."
+            ),
+        )
+        added = backlog.add(feature)
+        log.info("figma_ingested", file_key=file_key, component=component, added=added, feature_id=fid)
+        return {"new": added, "feature_id": fid}
+
     @app.post("/webhooks/support")
     async def support_webhook(payload: dict[str, Any]) -> dict[str, Any]:
         """Customer-support ticket ingest (research #3844). Expects:

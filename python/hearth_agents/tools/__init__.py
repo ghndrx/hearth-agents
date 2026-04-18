@@ -9,6 +9,7 @@ from .git_ops import (
     git_worktree_remove,
 )
 from .bisect_bench import bisect_bench
+from .a11y_audit import a11y_audit
 from .bisect_bench import bisect_bench
 from .classify_bump import classify_bump
 from .env_profile import env_profile
@@ -18,6 +19,7 @@ from .scaffold import scaffold_test_file
 from .scaffold_contract_test import scaffold_contract_test
 from .scaffold_i18n import scaffold_i18n
 from .scaffold_migration import scaffold_migration
+from .scaffold_otel import scaffold_otel
 from .scaffold_pbt import scaffold_pbt
 from .serper import web_search
 from .shell import run_command
@@ -57,5 +59,7 @@ __all__ = [
     "env_profile",
     "bisect_bench",
     "scaffold_i18n",
+    "scaffold_otel",
+    "a11y_audit",
     "validate_acceptance_criteria",
 ]
