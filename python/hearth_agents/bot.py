@@ -239,6 +239,50 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             lines.append(f"  {fid} waits for: {', '.join(unfin)}")
         await msg.answer("\n".join(lines))
 
+    @dp.message(Command("synth"))
+    async def _synth(msg: Message, command: CommandObject) -> None:
+        """Run wikidelve_synthesize against an article slug."""
+        args = (command.args or "").strip().split()
+        if not args:
+            await msg.answer(
+                "Usage: /synth <slug> [kb=personal]\n"
+                "Example: /synth autonomous-product-owner_-ai-driven-requirements..."
+            )
+            return
+        slug = args[0]
+        kb = "personal"
+        for a in args[1:]:
+            if a.startswith("kb="):
+                kb = a.split("=", 1)[1]
+        import urllib.request, urllib.parse, json as _json
+        await msg.answer(f"Synthesizing {kb}/{slug[:40]}... (~20s)")
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{settings.server_port}/research/synthesize",
+                data=_json.dumps({"kb": kb, "slug": slug}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                resp = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"synth failed: {e}")
+            return
+        lines = [f"📚 *{slug[:60]}*"]
+        if resp.get("summary"):
+            lines.append(f"\n{resp['summary'][:500]}")
+        if resp.get("verdict"):
+            lines.append(f"verdict: {resp['verdict']}")
+        for i, rec in enumerate(resp.get("recommendations", [])[:5], 1):
+            lines.append(f"\n{i}. *{rec.get('title','?')}* ({rec.get('leverage','?')})")
+            lines.append(f"   {rec.get('change_sketch','')[:200]}")
+            if rec.get("touches"):
+                lines.append(f"   touches: {', '.join(rec['touches'][:3])}")
+        skip = resp.get("skip_reasons") or []
+        if skip:
+            lines.append(f"\nskipped: {len(skip)} ({skip[0][:100] if skip else ''})")
+        await msg.answer("\n".join(lines)[:4000])
+
     @dp.message(Command("debate"))
     async def _debate(msg: Message, command: CommandObject) -> None:
         fid = (command.args or "").strip()

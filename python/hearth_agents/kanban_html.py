@@ -296,7 +296,7 @@ KANBAN_HTML = r"""<!doctype html>
   </div>
 </template>
 
-<!-- Dep-graph modal -->
+<!-- Dep-graph modal with SVG visualization -->
 <template x-if="depGraph !== null">
   <div @keydown.escape.window="depGraph = null">
     <div class="fixed inset-0 bg-black/70 backdrop-blur-sm z-10" @click="depGraph = null"></div>
@@ -307,6 +307,30 @@ KANBAN_HTML = r"""<!doctype html>
         <span x-text="depGraph.nodes.length"></span> linked nodes ·
         <span x-text="depGraph.edges.length"></span> edges · red ID = blocked by unfinished dep.
       </p>
+      <div class="mb-4 p-4 bg-bg rounded-lg border border-border overflow-auto">
+        <svg :width="depGraphLayout.width" :height="depGraphLayout.height" class="block">
+          <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+              <polygon points="0 0, 10 3.5, 0 7" fill="#8b949e" />
+            </marker>
+          </defs>
+          <!-- Edges -->
+          <template x-for="e in depGraphLayout.edges" :key="e.from + '-' + e.to">
+            <line :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowhead)" opacity="0.7" />
+          </template>
+          <!-- Nodes -->
+          <template x-for="n in depGraphLayout.nodes" :key="n.id">
+            <g :transform="'translate(' + n.x + ',' + n.y + ')'">
+              <rect x="-70" y="-14" width="140" height="28" rx="6"
+                    :fill="n.blocked_by_deps ? '#f85149' : n.status === 'done' ? '#3fb950' : n.status === 'pending' ? '#8b949e' : '#58a6ff'"
+                    fill-opacity="0.2"
+                    :stroke="n.blocked_by_deps ? '#f85149' : n.status === 'done' ? '#3fb950' : n.status === 'pending' ? '#8b949e' : '#58a6ff'"
+                    stroke-width="1.5" />
+              <text text-anchor="middle" y="4" fill="#e6edf3" font-size="10" font-family="SFMono-Regular, Menlo, monospace" x-text="n.id.slice(0, 16)"></text>
+            </g>
+          </template>
+        </svg>
+      </div>
       <table class="w-full text-xs">
         <thead><tr class="text-muted border-b border-border">
           <th class="text-left pb-2 pr-3">feature</th>
@@ -663,6 +687,56 @@ function kanban() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.depGraph = await r.json();
       } catch (e) { this.flash('dep-graph fetch failed: ' + e.message, true); }
+    },
+    get depGraphLayout() {
+      // Simple layered layout: roots (no incoming edges) on left, then
+      // fan out right. Topological-ish ordering with vertical spread.
+      if (!this.depGraph) return { width: 0, height: 0, nodes: [], edges: [] };
+      const nodes = this.depGraph.nodes.map(n => ({ ...n }));
+      const edges = this.depGraph.edges;
+      // Compute depth (longest path from root) per node.
+      const incoming = {};
+      nodes.forEach(n => { incoming[n.id] = 0; });
+      edges.forEach(e => { if (incoming[e.to] !== undefined) incoming[e.to]++; });
+      const depth = {};
+      const queue = nodes.filter(n => incoming[n.id] === 0).map(n => n.id);
+      queue.forEach(id => { depth[id] = 0; });
+      const pending = {...incoming};
+      while (queue.length) {
+        const id = queue.shift();
+        edges.filter(e => e.from === id).forEach(e => {
+          pending[e.to]--;
+          depth[e.to] = Math.max(depth[e.to] || 0, (depth[id] || 0) + 1);
+          if (pending[e.to] === 0) queue.push(e.to);
+        });
+      }
+      // Group by depth to assign x; within a depth assign y sequentially.
+      const byDepth = {};
+      nodes.forEach(n => {
+        const d = depth[n.id] ?? 0;
+        (byDepth[d] = byDepth[d] || []).push(n);
+      });
+      const colWidth = 180;
+      const rowHeight = 44;
+      const padding = 30;
+      Object.entries(byDepth).forEach(([d, ns]) => {
+        ns.forEach((n, i) => {
+          n.x = padding + Number(d) * colWidth + 70;
+          n.y = padding + i * rowHeight + 20;
+        });
+      });
+      const maxDepth = Math.max(0, ...Object.keys(byDepth).map(Number));
+      const maxPerCol = Math.max(1, ...Object.values(byDepth).map(v => v.length));
+      const width = padding * 2 + (maxDepth + 1) * colWidth;
+      const height = padding * 2 + maxPerCol * rowHeight;
+      const nodeById = Object.fromEntries(nodes.map(n => [n.id, n]));
+      const laidOutEdges = edges.map(e => {
+        const a = nodeById[e.from], b = nodeById[e.to];
+        if (!a || !b) return null;
+        // Entry/exit at node rectangle edges.
+        return { from: e.from, to: e.to, x1: a.x + 70, y1: a.y, x2: b.x - 70, y2: b.y };
+      }).filter(Boolean);
+      return { width, height, nodes, edges: laidOutEdges };
     },
     async loadSnapshots() {
       try {

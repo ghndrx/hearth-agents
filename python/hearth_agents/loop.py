@@ -396,6 +396,7 @@ def _append_attempt_log(
     input_tokens: int,
     output_tokens: int,
     duration_sec: float = 0.0,
+    worker_id: int = 0,
 ) -> None:
     """Append one line per attempt to ``/data/attempts.jsonl``. Foundation
     for the debugging-session-replay tooling (research #3807) — captures
@@ -423,6 +424,7 @@ def _append_attempt_log(
         "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
         "feature_id": feature_id,
         "attempt": attempt,
+        "worker": int(worker_id),
         "provider": provider,
         "input_tokens": int(input_tokens),
         "output_tokens": int(output_tokens),
@@ -1149,6 +1151,7 @@ async def run_once(
             _append_attempt_log(
                 feature.id, attempt, active_provider, result, in_tok, out_tok,
                 duration_sec=_time_attempt.time() - _attempt_started,
+                worker_id=worker_id,
             )
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"

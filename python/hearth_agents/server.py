@@ -345,6 +345,73 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from .prompt_analyzer import analyze
         return analyze()
 
+    @app.post("/research/synthesize")
+    async def research_synthesize(payload: dict[str, Any]) -> dict[str, Any]:
+        """Run wikidelve_synthesize on an article slug. Body:
+          {"kb": "personal", "slug": "autonomous-..."}
+        Returns the article summary + structured recommendations as
+        parsed JSON (or {raw: true, summary: ...} when the LLM output
+        didn't parse as JSON). Operator-triggered closure of the
+        research→recommendations→Feature loop."""
+        kb = (payload.get("kb") or "personal").strip()
+        slug = (payload.get("slug") or "").strip()
+        if not slug:
+            raise HTTPException(status_code=400, detail="slug required")
+        from .tools.wikidelve_synthesize import wikidelve_synthesize
+        result = await wikidelve_synthesize.ainvoke({"kb": kb, "slug": slug})
+        import json as _json
+        try:
+            return _json.loads(result)
+        except _json.JSONDecodeError:
+            return {"raw": True, "text": result[:4000]}
+
+    @app.get("/backlog/replay")
+    async def backlog_replay() -> dict[str, Any]:
+        """Rebuild Backlog state as a projection from transitions.jsonl.
+
+        Useful to (a) confirm the live backlog matches the audit trail,
+        (b) diagnose divergence when something looks off in the kanban
+        vs the transition history. Does NOT mutate live state — it's
+        a read-only projection showing what the backlog WOULD look
+        like if you replayed every transition from scratch.
+
+        Drift between projection and live state is itself a signal —
+        usually means a direct mutation bypassed record_transition.
+        """
+        from .transitions import read_tail
+        # Start with all features that ever had a transition, final
+        # status derived from the last transition's "to".
+        projection: dict[str, str] = {}
+        ever_seen: set[str] = set()
+        for t in read_tail(limit=100000):
+            fid = t.get("feature_id") or ""
+            to = t.get("to") or ""
+            if not fid or not to:
+                continue
+            ever_seen.add(fid)
+            if to == "nuked":
+                projection.pop(fid, None)
+            else:
+                projection[fid] = to
+        live: dict[str, str] = {f.id: f.status for f in backlog.features}
+        missing_in_live = sorted(fid for fid in projection if fid not in live and projection.get(fid))
+        missing_in_projection = sorted(fid for fid in live if fid not in projection)
+        status_mismatches = sorted(
+            fid for fid in projection
+            if fid in live and live[fid] != projection[fid]
+        )
+        return {
+            "projection_feature_count": len(projection),
+            "live_feature_count": len(live),
+            "missing_in_live": missing_in_live[:40],
+            "missing_in_projection": missing_in_projection[:40],
+            "status_mismatches": [
+                {"id": fid, "projection": projection[fid], "live": live[fid]}
+                for fid in status_mismatches[:40]
+            ],
+            "healthy": not (missing_in_live or missing_in_projection or status_mismatches),
+        }
+
     @app.get("/backlog/export")
     async def backlog_export() -> list[dict[str, Any]]:
         """Full backlog snapshot as JSON. For migration between instances
