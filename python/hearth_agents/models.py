@@ -46,9 +46,16 @@ def _langfuse_callbacks() -> list:
 
 
 def build_minimax() -> ChatOpenAI:
-    """MiniMax M2.7: 205K context, cheap, strong at planning and decomposition."""
+    """MiniMax M2.7: 205K context, cheap, strong at planning and decomposition.
+
+    Explicit httpx timeouts added alongside the LangChain-level `timeout`
+    so a hung TCP connection fails fast instead of holding a worker for
+    the full 180s LangChain budget + OS TCP retransmit (which in
+    gateway-01 infra-pressure incidents stretched to ~10m per call).
+    """
     if not settings.minimax_api_key:
         raise RuntimeError("MINIMAX_API_KEY is required")
+    import httpx
     return ChatOpenAI(
         model=settings.minimax_model,
         api_key=settings.minimax_api_key,
@@ -56,6 +63,7 @@ def build_minimax() -> ChatOpenAI:
         temperature=0.3,
         max_retries=3,
         timeout=180,
+        http_client=httpx.Client(timeout=httpx.Timeout(connect=10.0, read=180.0, write=10.0, pool=10.0)),
         callbacks=_langfuse_callbacks() or None,
     )
 
@@ -87,5 +95,10 @@ def build_kimi() -> ChatOpenAI:
         timeout=180,
         default_headers=default_headers or None,
         extra_body={"thinking": {"type": "disabled"}},
+        http_client=__import__("httpx").Client(
+            timeout=__import__("httpx").Timeout(connect=10.0, read=180.0, write=10.0, pool=10.0),
+            headers=default_headers or None,
+        ),
         callbacks=_langfuse_callbacks() or None,
     )
+

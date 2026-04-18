@@ -784,6 +784,44 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "last_recorded_attempt": last_attempt,
         }
 
+    @app.get("/dashboard")
+    async def dashboard_all() -> dict[str, Any]:
+        """Cross-repo dashboard rollup. Each repo's by_status + 24h
+        velocity + top-3 blocks in one payload, sorted by total
+        features desc. Faster operator mental check than hitting
+        /dashboard/{repo} four times."""
+        from collections import Counter
+        repos: dict[str, dict[str, Any]] = {}
+        for f in backlog.features:
+            for repo in f.repos:
+                repos.setdefault(repo, {
+                    "repo": repo,
+                    "total": 0,
+                    "by_status": Counter(),
+                    "by_kind": Counter(),
+                    "recent_24h": {"total": 0, "done": 0, "blocked": 0},
+                    "top_reasons": Counter(),
+                })
+                repos[repo]["total"] += 1
+                repos[repo]["by_status"][f.status] += 1
+                repos[repo]["by_kind"][f.kind] += 1
+                if _age_sec(f.created_at) <= 86400:
+                    repos[repo]["recent_24h"]["total"] += 1
+                    if f.status == "done":
+                        repos[repo]["recent_24h"]["done"] += 1
+                    elif f.status == "blocked":
+                        repos[repo]["recent_24h"]["blocked"] += 1
+                if f.status == "blocked":
+                    prefix = (f.heal_hint or "(no hint)")[:60].strip().rstrip(":").rstrip(".")
+                    repos[repo]["top_reasons"][prefix] += 1
+        out = []
+        for repo, d in sorted(repos.items(), key=lambda kv: -kv[1]["total"]):
+            d["by_status"] = dict(d["by_status"])
+            d["by_kind"] = dict(d["by_kind"])
+            d["top_reasons"] = [{"reason": r, "count": c} for r, c in d["top_reasons"].most_common(3)]
+            out.append(d)
+        return {"repos": out}
+
     @app.get("/dashboard/{repo_name}")
     async def repo_dashboard(repo_name: str) -> dict[str, Any]:
         """Per-repo rollup: backlog by status + kind, recent throughput,

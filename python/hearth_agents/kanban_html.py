@@ -114,10 +114,10 @@ KANBAN_HTML = r"""<!doctype html>
   <div class="px-5 pb-3 flex items-center gap-2 flex-wrap" x-show="stats && stats.block_reasons_top10 && stats.block_reasons_top10.length">
     <span class="text-[10px] uppercase tracking-wider text-muted font-medium">block reasons</span>
     <template x-for="r in (stats && stats.block_reasons_top10) || []" :key="r.reason">
-      <span class="inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-md bg-surface border border-border" :title="r.reason">
+      <button @click="filterText = r.reason.slice(0, 40)" class="inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-md bg-surface border border-border hover:border-accent cursor-pointer" :title="'click to filter to features matching this reason\n\n' + r.reason">
         <span class="text-blocked font-semibold" x-text="r.count"></span>
         <span class="text-muted" x-text="r.reason.slice(0, 50)"></span>
-      </span>
+      </button>
     </template>
   </div>
 </header>
@@ -603,10 +603,13 @@ function kanban() {
       if (this.riskFilter) base = base.filter(f => (f.risk_tier || 'low') === this.riskFilter);
       const q = this.filterText.trim().toLowerCase();
       if (!q) return base;
+      // Search now also matches heal_hint substring so clicking a
+      // block-reason chip in the header filters correctly.
       return base.filter(f =>
         (f.id || '').toLowerCase().includes(q) ||
         (f.name || '').toLowerCase().includes(q) ||
-        (f.repos || []).some(r => r.toLowerCase().includes(q))
+        (f.repos || []).some(r => r.toLowerCase().includes(q)) ||
+        (f.heal_hint || '').toLowerCase().includes(q)
       );
     },
     async act(id, action) {

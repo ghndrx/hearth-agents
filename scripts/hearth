@@ -306,6 +306,47 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_watch(args: list[str]) -> None:
+    """Tail /events. Prints one human-readable line per transition.
+    Reconnects automatically on drop. Use ctrl-c to exit."""
+    import time
+    import http.client
+    from urllib.parse import urlparse
+    url = urlparse(BASE + "/events")
+    is_https = url.scheme == "https"
+    while True:
+        try:
+            conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
+            conn = conn_cls(url.netloc, timeout=30)
+            conn.request("GET", url.path, headers={"Accept": "text/event-stream"})
+            resp = conn.getresponse()
+            if resp.status != 200:
+                print(f"SSE returned {resp.status}; retry in 5s", file=sys.stderr)
+                time.sleep(5); continue
+            print(f"# tailing {url.geturl()} — ctrl-c to exit")
+            buf = ""
+            while True:
+                chunk = resp.read(1)
+                if not chunk:
+                    break
+                buf += chunk.decode(errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.rstrip("\r")
+                    if line.startswith("data:"):
+                        try:
+                            e = json.loads(line[5:].strip())
+                            ts = e.get("ts", "")[11:19]
+                            print(f"  {ts} {e.get('feature_id','?'):35s} {e.get('from','-')} → {e.get('to')} [{e.get('actor','?')}]")
+                        except json.JSONDecodeError:
+                            pass
+        except KeyboardInterrupt:
+            return
+        except Exception as e:
+            print(f"# disconnected ({e}); reconnecting in 5s", file=sys.stderr)
+            time.sleep(5)
+
+
 def cmd_bulk(args: list[str]) -> None:
     """hearth bulk <action> <query-dsl> — bulk-action by query."""
     if len(args) < 2:
@@ -337,7 +378,7 @@ COMMANDS = {
     "deploy": cmd_deploy,
     "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
-    "read-only": cmd_read_only, "validate": cmd_validate,
+    "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
 }
 
 
