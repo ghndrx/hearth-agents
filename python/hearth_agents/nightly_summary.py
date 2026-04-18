@@ -81,6 +81,24 @@ def _format_message(backlog: Backlog) -> str:
         prefix = (f.heal_hint or "(no hint)")[:60].strip().rstrip(":").rstrip(".")
         reason_counter[prefix] += 1
 
+    # Shipped-today list: every feature that transitioned to done in
+    # the last 24h window, with names so operators can skim what
+    # actually landed vs just seeing the count.
+    shipped: list[str] = []
+    for t in read_tail(limit=20000):
+        if t.get("to") != "done":
+            continue
+        try:
+            ts = datetime.fromisoformat((t.get("ts") or "").replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if ts < day_ago:
+            continue
+        fid = t.get("feature_id") or ""
+        feat = next((f for f in backlog.features if f.id == fid), None)
+        if feat:
+            shipped.append(f"  ✅ {feat.id}: {feat.name[:50]}")
+
     lines = [
         "🌅 *Nightly summary*",
         f"Backlog: done {stats.get('done', 0)} · blocked {stats.get('blocked', 0)} · "
@@ -90,6 +108,11 @@ def _format_message(backlog: Backlog) -> str:
         f"Active prompts: `{active.get('prompts_version','?')}` @ {active_rate:.1%}"
         + (f" (best trusted {best_rate:.1%})" if best_rate else ""),
     ]
+    if shipped:
+        lines.append(f"\nShipped today ({len(shipped)}):")
+        lines.extend(shipped[:15])
+        if len(shipped) > 15:
+            lines.append(f"  ... and {len(shipped) - 15} more")
     if reason_counter:
         lines.append("Top blocks:")
         for r, c in reason_counter.most_common(3):

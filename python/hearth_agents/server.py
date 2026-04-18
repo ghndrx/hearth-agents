@@ -92,6 +92,19 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 continue
             lines.append(f'hearth_features_total{{status="{status}"}} {n}')
         lines.append(f"hearth_features_total{{status=\"all\"}} {stats.get('total', 0)}")
+        # Per-repo + per-status breakdown (multi-dimensional Prometheus
+        # label). Each Feature contributes to every repo it touches.
+        from collections import Counter as _C
+        per_repo_status: dict[tuple[str, str], int] = {}
+        for f in backlog.features:
+            for r in f.repos:
+                per_repo_status[(r, f.status)] = per_repo_status.get((r, f.status), 0) + 1
+        lines += [
+            "# HELP hearth_features_by_repo_total Feature count by repo + status",
+            "# TYPE hearth_features_by_repo_total gauge",
+        ]
+        for (repo, status), n in per_repo_status.items():
+            lines.append(f'hearth_features_by_repo_total{{repo="{repo}",status="{status}"}} {n}')
         lines += [
             "# HELP hearth_subsystems_stale Count of background tasks past expected heartbeat",
             "# TYPE hearth_subsystems_stale gauge",
@@ -1205,6 +1218,43 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             })
         return {"repos": repos}
 
+    @app.get("/features/{feature_id}/time-in-status")
+    async def feature_time_in_status(feature_id: str) -> dict[str, Any]:
+        """Reconstruct how long a feature spent in each status by
+        walking its transition history. Useful for "why did this
+        take 3 days to ship?" or "which status did it get stuck in?"
+        analysis without pulling the full /history + doing the math
+        in the caller."""
+        from .transitions import read_tail
+        entries = read_tail(limit=20000, feature_id=feature_id)
+        if not entries:
+            return {"feature_id": feature_id, "durations_sec": {}, "current_status_since": None}
+        durations: dict[str, float] = {}
+        prev_status = None
+        prev_ts: float | None = None
+        current_status_since: str | None = None
+        for t in entries:
+            ts_iso = t.get("ts", "")
+            try:
+                ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            if prev_status is not None and prev_ts is not None:
+                durations[prev_status] = durations.get(prev_status, 0.0) + (ts - prev_ts)
+            prev_status = t.get("to")
+            prev_ts = ts
+            current_status_since = ts_iso
+        # Accumulate current-status duration up to now.
+        now = datetime.now(timezone.utc).timestamp()
+        if prev_status is not None and prev_ts is not None:
+            durations[prev_status] = durations.get(prev_status, 0.0) + (now - prev_ts)
+        return {
+            "feature_id": feature_id,
+            "current_status": prev_status,
+            "current_status_since": current_status_since,
+            "durations_sec": {k: int(v) for k, v in durations.items()},
+        }
+
     @app.get("/features/{feature_id}/notes")
     async def feature_notes(feature_id: str) -> list[dict[str, Any]]:
         """Return operator notes for a feature. Stored as JSONL at
@@ -1576,6 +1626,18 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             if f.id in relevant_ids
         ]
         return {"nodes": nodes, "edges": edges}
+
+    @app.post("/admin/replay-repair")
+    async def admin_replay_repair(payload: dict[str, Any]) -> dict[str, Any]:
+        """One-shot: call /backlog/repair (dry_run first, then real
+        unless ``force: true`` is omitted). Returns the dry-run
+        summary + apply summary. Operator pattern: SSH is slow, this
+        saves two round-trips."""
+        dry = await backlog_repair({"dry_run": True})
+        if not payload.get("force"):
+            return {"stage": "dry_run", **dry}
+        real = await backlog_repair({"dry_run": False})
+        return {"stage": "applied", "dry_run_result": dry, "apply_result": real}
 
     @app.post("/admin/read-only")
     async def admin_read_only(payload: dict[str, Any]) -> dict[str, Any]:
