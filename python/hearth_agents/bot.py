@@ -39,18 +39,18 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
     @dp.message(Command("start"))
     async def _start(msg: Message) -> None:
         await msg.answer(
-            "Hearth agent online. Commands:\n"
-            "  /status — backlog counts\n"
-            "  /stats — full /stats incl. block reasons\n"
-            "  /features — list every feature\n"
-            "  /enqueue <id> | <name> | <desc> — queue a feature\n"
-            "  /bug <id> | <name> | <desc> | <repro_cmd> — queue a bug\n"
-            "  /approve <id> — mark blocked → done (human verified)\n"
-            "  /retry <id> — reset heal + flip to pending\n"
-            "  /nuke <id> — remove from backlog\n"
-            "  /cost — total spend + top 3 features by cost\n"
-            "  /who — per-worker current feature\n"
-            "Anything else is a one-shot query."
+            "Hearth operator. Commands:\n"
+            "  /status /stats — backlog overview\n"
+            "  /features /search <query-dsl> — list\n"
+            "  /dash <repo> /forecast /recent — dashboards\n"
+            "  /enqueue /bug — queue work\n"
+            "  /approve /retry /nuke /debate — act on one\n"
+            "  /schedule /deps /cost /who — ops views\n"
+            "\n"
+            "Or just chat naturally — 'what's blocked?', "
+            "'nuke all the gh-* features', 'show me role-sort-order-api', "
+            "'approve everything with CVE in the name'. "
+            "The chat agent will pick the right tools."
         )
 
     @dp.message(Command("status"))
@@ -285,16 +285,117 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             )
         await msg.answer("\n".join(lines))
 
-    # Any non-command text becomes a one-shot agent invocation.
+    @dp.message(Command("search"))
+    async def _search(msg: Message, command: CommandObject) -> None:
+        q = (command.args or "").strip()
+        if not q:
+            await msg.answer("Usage: /search <query-dsl>\nExample: /search status:blocked AND kind:bug")
+            return
+        matches = []
+        from . import backlog as _b  # noqa: F401 (import for server access pattern)
+        # Delegate through the HTTP query endpoint using the same DSL as
+        # the kanban operator — keeps behavior identical.
+        import urllib.parse, urllib.request, json as _json
+        url = f"http://127.0.0.1:{settings.server_port}/features?query={urllib.parse.quote(q)}&limit=20"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                matches = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"search failed: {e}")
+            return
+        if not matches:
+            await msg.answer("(no matches)")
+            return
+        lines = [f"Matched {len(matches)}:"]
+        for f in matches[:15]:
+            lines.append(f"  [{f['status']:12s}] {f['kind']:10s} {f['id']}: {f['name'][:55]}")
+        await msg.answer("\n".join(lines))
+
+    @dp.message(Command("dash"))
+    async def _dash(msg: Message, command: CommandObject) -> None:
+        repo = (command.args or "hearth").strip()
+        import urllib.parse, urllib.request, json as _json
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{settings.server_port}/dashboard/{urllib.parse.quote(repo)}",
+                timeout=10,
+            ) as r:
+                d = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"dash failed: {e}")
+            return
+        lines = [
+            f"*{repo}* · total={d.get('total')}",
+            f"by_status: {d.get('by_status')}",
+            f"24h: done={d.get('recent_24h',{}).get('done')} blocked={d.get('recent_24h',{}).get('blocked')}",
+        ]
+        for r in (d.get("top_block_reasons") or [])[:3]:
+            lines.append(f"  {r['count']}× {r['reason'][:60]}")
+        await msg.answer("\n".join(lines))
+
+    @dp.message(Command("forecast"))
+    async def _forecast(msg: Message) -> None:
+        import urllib.request, json as _json
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{settings.server_port}/cost-analytics/forecast", timeout=10,
+            ) as r:
+                f = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"forecast failed: {e}")
+            return
+        await msg.answer(
+            f"month-to-date: ${f.get('month_to_date_usd',0):.4f}\n"
+            f"trend: ${f.get('trend_avg_daily_usd',0):.4f}/d over {f.get('trend_sample_days',0)}d\n"
+            f"forecast eom: ${f.get('forecast_usd',0):.4f}"
+        )
+
+    @dp.message(Command("recent"))
+    async def _recent(msg: Message, command: CommandObject) -> None:
+        try:
+            limit = int((command.args or "15").strip())
+        except ValueError:
+            limit = 15
+        import urllib.request, json as _json
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{settings.server_port}/transitions?limit={limit}", timeout=10,
+            ) as r:
+                rows = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"recent failed: {e}")
+            return
+        if not rows:
+            await msg.answer("(no transitions yet)")
+            return
+        lines = [f"Last {len(rows)} transitions:"]
+        for t in rows:
+            lines.append(f"  {t.get('ts','')[11:19]} {t.get('feature_id','?'):30s} {t.get('from','-')} → {t.get('to','?')} [{t.get('actor','?')}]")
+        await msg.answer("\n".join(lines)[:4000])
+
+    # Any non-command text routes to the KANBAN agent — a slim chat-operator
+    # agent with only the kanban-ops tools. Heavyweight product agent is
+    # reserved for /enqueue's freeform research flow.
+    _kanban_agent = {"instance": None}
+
     @dp.message(F.text & ~F.text.startswith("/"))
     async def _freeform(msg: Message) -> None:
         await msg.bot.send_chat_action(chat_id=msg.chat.id, action="typing")
+        if _kanban_agent["instance"] is None:
+            try:
+                from .agent import build_kanban_agent
+                _kanban_agent["instance"] = build_kanban_agent()
+                log.info("kanban_agent_built")
+            except Exception as e:  # noqa: BLE001
+                log.warning("kanban_agent_build_failed", err=str(e)[:200])
+                # Fallback: use the main agent (heavier but still works).
+                _kanban_agent["instance"] = agent
         try:
-            result = await agent.ainvoke({"messages": [{"role": "user", "content": msg.text}]})
+            result = await _kanban_agent["instance"].ainvoke(
+                {"messages": [{"role": "user", "content": msg.text}]}
+            )
             messages = result.get("messages", [])
             reply = messages[-1].content if messages else ""
-            # Telegram caps messages at 4096; truncate rather than split to keep
-            # the bot's behavior predictable — long answers belong in PRs, not DMs.
             await msg.answer(reply[:4000] or "(empty reply)")
         except Exception as e:
             log.exception("bot_invoke_failed", error=str(e))

@@ -926,6 +926,61 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         log.info("admin_task_restarted", task=task_name)
         return {"ok": True, "task": task_name, "previous_done": task.done()}
 
+    @app.post("/webhooks/support")
+    async def support_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+        """Customer-support ticket ingest (research #3844). Expects:
+          {subject, body, urgency, repo?, dedupe_key?}
+
+        Classifies urgency → risk_tier, runs a substring dedup against
+        open Features (cheap first pass; semantic dedup would need an
+        embedding service), emits a kind=bug Feature when new.
+        Returns {new: bool, feature_id, matched_existing?}.
+        """
+        from .backlog import Feature
+        from .sanitize import sanitize as _sanitize
+        subject = (payload.get("subject") or "").strip()
+        body = (payload.get("body") or "").strip()
+        if not subject and not body:
+            raise HTTPException(status_code=400, detail="subject or body required")
+        urgency = (payload.get("urgency") or "medium").lower()
+        repo = payload.get("repo") or "hearth"
+        dedupe = (payload.get("dedupe_key") or subject[:40] or body[:40]).strip()
+        sres = _sanitize(body or subject, provenance=f"support:{dedupe}", max_len=4000)
+        if sres.rejected:
+            raise HTTPException(status_code=400, detail=f"body rejected: {sres.reject_reason}")
+        # Cheap dedup: subject substring match against open bug features.
+        # Semantic dedup (iPACK) would need an embedding service.
+        subject_lc = subject.lower()
+        for f in backlog.features:
+            if f.kind != "bug" or f.status == "done":
+                continue
+            if subject_lc and subject_lc in (f.name or "").lower():
+                return {"new": False, "matched_existing": f.id, "status": f.status}
+        risk_tier = (
+            "high" if urgency in ("p1", "sev1", "critical", "high")
+            else "medium" if urgency in ("p2", "sev2", "normal", "medium")
+            else "low"
+        )
+        priority = "critical" if risk_tier == "high" else "high" if risk_tier == "medium" else "medium"
+        import hashlib
+        fid = f"support-{hashlib.sha256(dedupe.encode()).hexdigest()[:10]}"
+        feature = Feature(
+            id=fid,
+            name=subject[:200] or body[:80],
+            description=sres.safe_text,
+            priority=priority,  # type: ignore[arg-type]
+            repos=[repo],  # type: ignore[list-item]
+            kind="bug",
+            risk_tier=risk_tier,  # type: ignore[arg-type]
+            acceptance_criteria=(
+                "Support ticket resolved; repro_command fails before fix "
+                "and passes after; regression test added."
+            ),
+        )
+        added = backlog.add(feature)
+        log.info("support_ingested", dedupe=dedupe, urgency=urgency, tier=risk_tier, added=added, feature_id=fid)
+        return {"new": added, "feature_id": fid, "risk_tier": risk_tier}
+
     @app.post("/webhooks/alert")
     async def alert_webhook(request: Request) -> dict[str, Any]:
         """Normalize alert payloads from PagerDuty / Grafana / Datadog

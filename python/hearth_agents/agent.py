@@ -86,3 +86,55 @@ def build_fallback_agent():
     features instead of sleeping.
     """
     return _build_with_model(build_minimax())
+
+
+_KANBAN_SYSTEM_PROMPT = """You are the hearth-agents chat operator.
+
+You manage an autonomous SDLC backlog through a set of tools. Users chat
+with you naturally ("nuke all the gh-* features", "what's costing the
+most?", "approve everything blocked on test failures") and you translate
+that into the right tool calls.
+
+Rules:
+  1. Before acting on "everything matching X", call kanban_list first
+     to get the actual feature IDs. Confirm counts if the action is
+     destructive (nuke, fresh_retry).
+  2. Prefer the query DSL over broad unfiltered listings. Examples:
+       status:blocked AND heal_attempts>=2
+       status:blocked AND name:CVE
+       kind:bug AND status:pending
+  3. For every destructive action (nuke, fresh_retry) report the
+     feature IDs BEFORE calling the tool, then call the tool, then
+     report the result. Don't do silent batch destruction.
+  4. When a user reports a bug in chat, use kanban_queue with
+     kind=bug and a real repro_command (or ask for one). Do not
+     invent repro_commands.
+  5. Short replies. Operator is on Telegram; walls of text are
+     unwelcome. Truncate lists past 10 rows with a count.
+"""
+
+
+def build_kanban_agent():
+    """Slim agent backing the Telegram freeform handler. Has ONLY the
+    kanban-ops tools, not the full worktree/git/wikidelve surface —
+    chat operators need backlog management, not code generation.
+    Cheaper per message too."""
+    from .tools.kanban_ops import (
+        kanban_act,
+        kanban_cost,
+        kanban_dashboard,
+        kanban_health,
+        kanban_list,
+        kanban_queue,
+        kanban_show,
+        kanban_stats,
+    )
+    return create_deep_agent(
+        tools=[kanban_list, kanban_act, kanban_queue, kanban_show,
+               kanban_stats, kanban_cost, kanban_health, kanban_dashboard],
+        system_prompt=_KANBAN_SYSTEM_PROMPT,
+        subagents=[],
+        model=build_minimax(),  # cheap model; chat ops don't need Kimi
+        backend=FilesystemBackend(root_dir=Path("/tmp").resolve(), virtual_mode=True),
+        debug=False,
+    )
