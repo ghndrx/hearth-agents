@@ -25,7 +25,14 @@ def _cost(in_tokens: int, out_tokens: int) -> float:
 def analyze_costs() -> dict[str, Any]:
     """Return per-feature totals + daily series + per-provider split."""
     if not _ATTEMPTS_PATH.exists():
-        return {"total_cost_usd": 0.0, "features": [], "daily": [], "providers": {}}
+        return {
+            "total_cost_usd": 0.0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "top_features": [],
+            "daily": [],
+            "providers": {},
+        }
     per_feature_in: dict[str, int] = defaultdict(int)
     per_feature_out: dict[str, int] = defaultdict(int)
     per_feature_attempts: dict[str, int] = defaultdict(int)
