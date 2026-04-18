@@ -27,6 +27,7 @@ RETENTION_DAYS = 30
 async def run_snapshot(backlog: Backlog) -> None:
     """Background task. Runs every 24h; never raises externally."""
     from .heartbeat import beat
+    beat("snapshot")  # mark alive before initial sleep
     await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
     while True:
         beat("snapshot")

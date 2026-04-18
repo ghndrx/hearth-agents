@@ -66,6 +66,7 @@ def _sweep(backlog: Backlog) -> int:
 async def run_stuck_feature_escalator(backlog: Backlog) -> None:
     """Background task. Runs every 5m; never raises externally."""
     from .heartbeat import beat
+    beat("stuck_feature_escalator")  # mark alive before initial sleep
     await asyncio.sleep(SCAN_INTERVAL_SEC)
     while True:
         beat("stuck_feature_escalator")

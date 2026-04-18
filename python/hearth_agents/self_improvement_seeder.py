@@ -71,6 +71,7 @@ def _scan(backlog: Backlog) -> int:
 async def run_self_improvement_seeder(backlog: Backlog) -> None:
     """Background task. Idempotent + bounded by REASON_THRESHOLD."""
     from .heartbeat import beat
+    beat("self_improvement_seeder")  # mark alive before initial sleep
     await asyncio.sleep(SCAN_INTERVAL_SEC)
     while True:
         beat("self_improvement_seeder")

@@ -30,6 +30,7 @@ REGRESSION_RATIO = 0.80
 async def run_drift_alarm() -> None:
     """Background task. Emits at most one alert per (version, boot)."""
     from .heartbeat import beat
+    beat("drift_alarm")  # mark alive before initial sleep so /health is honest
     notifier = Notifier()
     alerted_versions: set[str] = set()
     await asyncio.sleep(DRIFT_INTERVAL_SEC)

@@ -25,6 +25,7 @@ DIGEST_INTERVAL_SEC = 24 * 60 * 60  # 24h rollup
 async def run_digest(backlog: Backlog) -> None:
     """Background task: emit a 24h summary to Telegram daily."""
     from .heartbeat import beat
+    beat("digest")  # mark alive immediately so /health doesn't show stale during the initial sleep
     notifier = Notifier()
     # Wait one interval before the first digest so a restart storm doesn't
     # ping multiple times. The operator can always hit /stats for on-demand.
