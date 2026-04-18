@@ -21,6 +21,7 @@ from .digest import run_digest
 from .drift_alarm import run_drift_alarm
 from .nightly_summary import run_nightly_summary
 from .research_watch import run_research_watch
+from .transition_compaction import run_transition_compaction
 from .scheduler import run_scheduler
 from .self_improvement_seeder import run_self_improvement_seeder
 from .snapshot_task import run_snapshot
@@ -71,6 +72,7 @@ async def _main() -> None:
         "snapshot": lambda: run_snapshot(backlog),
         "research_watch": lambda: run_research_watch(),
         "nightly_summary": lambda: run_nightly_summary(backlog),
+        "transition_compaction": lambda: run_transition_compaction(),
     }
     bg_tasks: dict[str, tuple[asyncio.Task, Any]] = {}
     for name, factory in factories.items():

@@ -181,6 +181,9 @@ KANBAN_HTML = r"""<!doctype html>
                       :class="f.risk_tier === 'high' ? 'bg-blocked/20 text-blocked' : 'bg-high/20 text-high'"
                       x-text="'risk: ' + f.risk_tier"></span>
               </template>
+              <template x-if="costByFeature[f.id] && costByFeature[f.id] > 0">
+                <span class="text-[9px] px-1.5 py-0.5 rounded bg-done/10 text-done font-mono tabular-nums" title="tokens spent on this feature" x-text="'$' + costByFeature[f.id].toFixed(3)"></span>
+              </template>
               <span class="ml-auto text-[9px] text-muted font-mono tabular-nums" :title="'created ' + f.created_at + ' · updated ' + f.updated_at" x-text="ageLabel(f.updated_at)"></span>
             </div>
 
@@ -492,6 +495,7 @@ function kanban() {
     features: [],
     stats: null,
     config: null,
+    costByFeature: {},
     history: {},
     analytics: null,
     addForm: null,
@@ -567,11 +571,19 @@ function kanban() {
     },
     async refresh() {
       try {
-        const [fr, sr, cr] = await Promise.all([fetch('/features'), fetch('/stats'), fetch('/config')]);
+        const [fr, sr, cr, costR] = await Promise.all([
+          fetch('/features'), fetch('/stats'), fetch('/config'), fetch('/cost-analytics')
+        ]);
         if (!fr.ok) throw new Error('features HTTP ' + fr.status);
         this.features = await fr.json();
         if (sr.ok) this.stats = await sr.json();
         if (cr.ok) this.config = await cr.json();
+        if (costR.ok) {
+          const cd = await costR.json();
+          const map = {};
+          for (const row of (cd.top_features || [])) map[row.feature_id] = row.cost_usd;
+          this.costByFeature = map;
+        }
         this.lastRefresh = Date.now();
         this.sinceLabel = '0';
       } catch (e) { this.flash('refresh failed: ' + e.message, true); }

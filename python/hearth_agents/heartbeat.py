@@ -36,6 +36,7 @@ _intervals: dict[str, int] = {
     "autoscaler": 60,
     "research_watch": 1800,
     "nightly_summary": 86400,
+    "transition_compaction": 86400,
 }
 
 

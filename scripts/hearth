@@ -228,6 +228,86 @@ def cmd_deploy(args: list[str]) -> None:
     sys.exit(4)
 
 
+def cmd_forecast(args: list[str]) -> None:
+    f = _req("GET", "/cost-analytics/forecast")
+    print(f"month-to-date: ${f.get('month_to_date_usd', 0):.4f}")
+    print(f"trend:         ${f.get('trend_avg_daily_usd', 0):.4f}/d over {f.get('trend_sample_days', 0)}d")
+    print(f"forecast eom:  ${f.get('forecast_usd', 0):.4f}  ({f.get('end_of_month_days_ahead', 0)}d ahead)")
+
+
+def cmd_dashboard(args: list[str]) -> None:
+    repo = args[0] if args else "hearth"
+    d = _req("GET", f"/dashboard/{urllib.parse.quote(repo)}")
+    print(f"{repo}: total={d.get('total')} · by_status={d.get('by_status')}")
+    r = d.get("recent_24h", {})
+    print(f"  24h: done={r.get('done')} blocked={r.get('blocked')} total={r.get('total')}")
+    for br in (d.get("top_block_reasons") or [])[:5]:
+        print(f"  {br['count']}× {br['reason'][:60]}")
+
+
+def cmd_synth(args: list[str]) -> None:
+    if not args:
+        print("usage: hearth synth <slug> [kb=personal]", file=sys.stderr); sys.exit(2)
+    slug = args[0]
+    kb = "personal"
+    for a in args[1:]:
+        if a.startswith("kb="): kb = a.split("=", 1)[1]
+    print(f"synthesizing {kb}/{slug}... (~20s)")
+    r = _req("POST", "/research/synthesize", body={"kb": kb, "slug": slug})
+    if r.get("summary"):
+        print(f"\n{r['summary']}\n")
+    for i, rec in enumerate(r.get("recommendations", []), 1):
+        print(f"{i}. {rec.get('title','?')} ({rec.get('leverage','?')})")
+        print(f"   {rec.get('change_sketch','')}")
+        if rec.get("touches"):
+            print(f"   touches: {', '.join(rec['touches'])}")
+    skip = r.get("skip_reasons") or []
+    if skip:
+        print(f"\nskipped: {skip}")
+
+
+def cmd_export(args: list[str]) -> None:
+    """Dump full backlog as JSON to stdout."""
+    rows = _req("GET", "/backlog/export")
+    print(json.dumps(rows, indent=2))
+
+
+def cmd_search(args: list[str]) -> None:
+    if not args:
+        print("usage: hearth search <query-dsl>", file=sys.stderr); sys.exit(2)
+    rows = _req("GET", "/features", params={"query": " ".join(args), "limit": 50})
+    for f in rows:
+        mark = "●" if f["status"] == "done" else "○" if f["status"] == "pending" else "◐"
+        print(f"  {mark} [{f['status']:12s}] {f['priority']:8s} {f['kind']:10s} {f['id']}: {f['name'][:60]}")
+    print(f"\n{len(rows)} shown")
+
+
+def cmd_build(args: list[str]) -> None:
+    b = _req("GET", "/build")
+    for k, v in b.items():
+        print(f"  {k}: {v}")
+
+
+def cmd_bulk(args: list[str]) -> None:
+    """hearth bulk <action> <query-dsl> — bulk-action by query."""
+    if len(args) < 2:
+        print("usage: hearth bulk <approve|retry|nuke|fresh_retry> <query-dsl>", file=sys.stderr); sys.exit(2)
+    action = args[0]
+    query = " ".join(args[1:])
+    # Always do dry-run first.
+    dry = _req("POST", "/features/bulk-action", body={"query": query, "action": action, "dry_run": True})
+    ids = dry.get("ids") or []
+    print(f"matched {dry.get('matched', 0)} features: {', '.join(ids[:10])}{'...' if len(ids) > 10 else ''}")
+    if not ids:
+        return
+    confirm = input(f"Apply {action} to all {len(ids)}? [y/N] ").strip().lower()
+    if confirm != "y":
+        print("aborted"); return
+    out = _req("POST", "/features/bulk-action", body={"query": query, "action": action, "dry_run": False})
+    ok = sum(1 for r in out.get("results", []) if r.get("ok"))
+    print(f"{action}: {ok}/{out.get('count', 0)} ok")
+
+
 COMMANDS = {
     "status": cmd_status, "features": cmd_features, "show": cmd_show,
     "queue": cmd_queue, "bug": cmd_bug,
@@ -237,6 +317,8 @@ COMMANDS = {
     "debate": cmd_debate, "cost": cmd_cost,
     "who": cmd_who, "health": cmd_health, "dep": cmd_dep, "tail": cmd_tail,
     "deploy": cmd_deploy,
+    "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
+    "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
 }
 
 

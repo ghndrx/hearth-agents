@@ -1071,6 +1071,73 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             })
         return {"repos": repos}
 
+    @app.get("/features/{feature_id}/similar")
+    async def feature_similar(feature_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Return up to ``limit`` features with the highest name-similarity
+        to the target. Uses difflib ratio on lowercased-alnum-normalized
+        names — cheap, no embeddings required, good enough to catch
+        obvious near-duplicates ("add logout button" vs "logout button
+        in header"). Filters out the target itself and features in
+        status=done (older ones that already shipped — operator cares
+        about dupes in live work)."""
+        import difflib
+        target = next((f for f in backlog.features if f.id == feature_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="feature not found")
+        def _norm(s: str) -> str:
+            return "".join(c.lower() for c in s if c.isalnum() or c == " ").strip()
+        target_norm = _norm(target.name)
+        scored: list[tuple[float, Any]] = []
+        for f in backlog.features:
+            if f.id == feature_id or f.status == "done":
+                continue
+            ratio = difflib.SequenceMatcher(a=target_norm, b=_norm(f.name)).ratio()
+            if ratio >= 0.4:
+                scored.append((ratio, f))
+        scored.sort(key=lambda r: -r[0])
+        capped = max(1, min(limit, 50))
+        return [
+            {**f.to_dict(), "similarity": round(r, 3)}
+            for r, f in scored[:capped]
+        ]
+
+    @app.post("/features/bulk-action")
+    async def features_bulk_action(payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply one action to every feature matching a query-DSL.
+        Body: {"query": "status:blocked AND heal_attempts>=2",
+               "action": "approve|retry|nuke|fresh_retry",
+               "dry_run": true|false}
+
+        dry_run=true returns the matching IDs without acting. Always
+        run dry_run first on destructive actions (nuke, fresh_retry).
+        Returns per-feature {id, ok, message}."""
+        query = (payload.get("query") or "").strip()
+        action = (payload.get("action") or "").strip()
+        dry_run = bool(payload.get("dry_run", False))
+        if not query or not action:
+            raise HTTPException(status_code=400, detail="query and action required")
+        if action not in ("approve", "retry", "nuke", "fresh_retry", "cleanup_branch"):
+            raise HTTPException(status_code=400, detail="unknown action")
+        matching = [f for f in backlog.features if _eval_query(query, f)]
+        if dry_run:
+            return {
+                "dry_run": True,
+                "matched": len(matching),
+                "ids": [f.id for f in matching][:200],
+            }
+        results: list[dict[str, Any]] = []
+        for f in matching:
+            if action == "fresh_retry":
+                f.heal_attempts = 0
+                f.heal_hint = ""
+                backlog.set_status(f.id, "pending", reason=f"bulk_action fresh_retry", actor="kanban")
+                results.append({"id": f.id, "ok": True, "message": "fresh retry"})
+            else:
+                ok, msg = backlog.action(f.id, action)
+                results.append({"id": f.id, "ok": ok, "message": msg})
+        log.info("bulk_action", action=action, count=len(results))
+        return {"dry_run": False, "count": len(results), "results": results[:200]}
+
     @app.get("/features/{feature_id}/history")
     async def feature_history(feature_id: str) -> dict[str, Any]:
         """Per-feature transition timeline. Useful for RCA on 'why is
