@@ -11,6 +11,7 @@ import hmac
 from typing import Any
 
 import asyncio
+import urllib.parse
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -49,6 +50,66 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/metrics")
+    async def metrics() -> Any:
+        """Prometheus-format exposition of the counters operators
+        care about: backlog totals by status, 24h throughput, active
+        workers, stale-subsystem count, total cost, attempts count.
+        Scrape from a standard Prometheus / Grafana Agent install."""
+        from fastapi.responses import PlainTextResponse
+        from .heartbeat import status as _hb_status
+        from .loop import watchdog_state, circuit_state
+        from pathlib import Path as _P
+        import json as _json
+        stats = backlog.stats()
+        hb = _hb_status()
+        stale = sum(1 for v in hb.values() if v.get("stale"))
+        # Attempt count by reading line count of attempts.jsonl cheaply.
+        attempts = 0
+        try:
+            ap = _P("/data/attempts.jsonl")
+            if ap.exists():
+                with ap.open("r", encoding="utf-8") as f:
+                    attempts = sum(1 for _ in f)
+        except OSError:
+            pass
+        # Today's cost from /cost-analytics.
+        try:
+            from .cost_analytics import analyze_costs
+            ca = analyze_costs()
+            total_cost = float(ca.get("total_cost_usd", 0))
+        except Exception:  # noqa: BLE001
+            total_cost = 0.0
+        workers = watchdog_state()
+        cb = circuit_state()
+        lines = [
+            "# HELP hearth_features_total Feature count by status",
+            "# TYPE hearth_features_total gauge",
+        ]
+        for status, n in stats.items():
+            if status == "total":
+                continue
+            lines.append(f'hearth_features_total{{status="{status}"}} {n}')
+        lines.append(f"hearth_features_total{{status=\"all\"}} {stats.get('total', 0)}")
+        lines += [
+            "# HELP hearth_subsystems_stale Count of background tasks past expected heartbeat",
+            "# TYPE hearth_subsystems_stale gauge",
+            f"hearth_subsystems_stale {stale}",
+            "# HELP hearth_workers_active Currently-beating workers",
+            "# TYPE hearth_workers_active gauge",
+            f"hearth_workers_active {len(workers)}",
+            "# HELP hearth_attempts_total Cumulative agent.ainvoke count",
+            "# TYPE hearth_attempts_total counter",
+            f"hearth_attempts_total {attempts}",
+            "# HELP hearth_cost_usd_total Cumulative token spend",
+            "# TYPE hearth_cost_usd_total counter",
+            f"hearth_cost_usd_total {total_cost:.4f}",
+            "# HELP hearth_circuit_open Whether global circuit breaker is open",
+            "# TYPE hearth_circuit_open gauge",
+            f"hearth_circuit_open {1 if cb.get('open') else 0}",
+        ]
+        return PlainTextResponse("\n".join(lines) + "\n")
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -1143,6 +1204,53 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 ],
             })
         return {"repos": repos}
+
+    @app.get("/features/{feature_id}/notes")
+    async def feature_notes(feature_id: str) -> list[dict[str, Any]]:
+        """Return operator notes for a feature. Stored as JSONL at
+        /data/feature-notes/{id}.jsonl; lets operators annotate features
+        without touching heal_hint (which the agent reads and acts on)."""
+        import json as _json
+        from pathlib import Path as _P
+        path = _P(f"/data/feature-notes/{urllib.parse.quote(feature_id, safe='')}.jsonl")
+        if not path.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(_json.loads(line))
+                except _json.JSONDecodeError:
+                    continue
+        except OSError:
+            return []
+        return out
+
+    @app.post("/features/{feature_id}/notes")
+    async def feature_notes_add(feature_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append an operator note to a feature's thread."""
+        import json as _json
+        from pathlib import Path as _P
+        body = (payload.get("body") or "").strip()
+        author = (payload.get("author") or "operator")[:40]
+        if not body:
+            raise HTTPException(status_code=400, detail="body required")
+        if not any(f.id == feature_id for f in backlog.features):
+            raise HTTPException(status_code=404, detail="feature not found")
+        path = _P(f"/data/feature-notes/{urllib.parse.quote(feature_id, safe='')}.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "author": author,
+            "body": body[:4000],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry) + "\n")
+        log.info("feature_note_added", feature_id=feature_id, author=author)
+        return {"ok": True, "entry": entry}
 
     @app.get("/features/{feature_id}/similar")
     async def feature_similar(feature_id: str, limit: int = 10) -> list[dict[str, Any]]:

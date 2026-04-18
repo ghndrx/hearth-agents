@@ -154,8 +154,8 @@ KANBAN_HTML = r"""<!doctype html>
         </div>
         <template x-for="f in featuresByColumn(col).slice(0, 100)" :key="f.id">
           <div class="card-enter bg-bg rounded-md border border-border p-2.5 hover:border-accent/40 transition-colors cursor-pointer"
-               :class="selectedId === f.id ? 'ring-2 ring-accent' : ''"
-               @click="selectedId = f.id">
+               :class="multiSelection.has(f.id) ? 'ring-2 ring-done' : (selectedId === f.id ? 'ring-2 ring-accent' : '')"
+               @click="handleCardClick($event, f)">
             <!-- Title row -->
             <div class="flex items-start gap-2 mb-1.5">
               <span class="flex-1 text-[13px] font-medium text-fg truncate" :title="f.name" x-text="f.name"></span>
@@ -261,6 +261,16 @@ KANBAN_HTML = r"""<!doctype html>
 <!-- Footer shortcuts -->
 <div class="fixed bottom-2 left-4 text-[10px] text-muted font-mono">
   / search · j/k nav · a approve · r retry · n nuke · d debate · ? help
+</div>
+
+<!-- Multi-select action bar -->
+<div x-show="multiSelection.size > 0"
+     class="fixed bottom-4 left-1/2 -translate-x-1/2 glass border border-border rounded-lg px-4 py-2 shadow-modal flex items-center gap-3 text-xs z-30">
+  <span class="text-muted"><span class="text-fg font-semibold" x-text="multiSelection.size"></span> selected</span>
+  <button @click="bulkAct('approve')" class="px-2.5 py-1 rounded bg-done/20 text-done hover:bg-done/30">approve</button>
+  <button @click="bulkAct('retry')" class="px-2.5 py-1 rounded bg-impl/20 text-impl hover:bg-impl/30">retry</button>
+  <button @click="bulkAct('nuke')" class="px-2.5 py-1 rounded bg-blocked/20 text-blocked hover:bg-blocked/30">nuke</button>
+  <button @click="multiSelection = new Set()" class="px-2.5 py-1 rounded border border-border hover:bg-surface">clear</button>
 </div>
 
 <!-- Toast -->
@@ -541,6 +551,7 @@ function kanban() {
     openViews: false,
     savedViews: [],
     focusMode: false,
+    multiSelection: new Set(),
     selectedId: null,
     toast: '',
     toastErr: false,
@@ -854,6 +865,24 @@ function kanban() {
         const body = await r.json();
         this.history[id] = body.transitions || [];
       } catch (e) { this.flash('history fetch failed: ' + e.message, true); }
+    },
+    handleCardClick(event, f) {
+      if (event.shiftKey || event.metaKey || event.ctrlKey) {
+        // Multi-select toggle
+        const s = new Set(this.multiSelection);
+        if (s.has(f.id)) s.delete(f.id); else s.add(f.id);
+        this.multiSelection = s;
+        return;
+      }
+      this.selectedId = f.id;
+    },
+    async bulkAct(action) {
+      const ids = [...this.multiSelection];
+      if (!ids.length) return;
+      if (!confirm(action + ' ' + ids.length + ' feature(s)?')) return;
+      for (const id of ids) await this.act(id, action);
+      this.multiSelection = new Set();
+      this.flash(action + ': ' + ids.length);
     },
     loadViews() {
       try {

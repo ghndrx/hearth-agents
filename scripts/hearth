@@ -306,6 +306,49 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_diff(args: list[str]) -> None:
+    """hearth diff <from_date> <to_date> — snapshot diff."""
+    if len(args) < 2:
+        print("usage: hearth diff YYYY-MM-DD YYYY-MM-DD", file=sys.stderr); sys.exit(2)
+    r = _req("GET", "/backlog/diff", params={"from_date": args[0], "to_date": args[1]})
+    print(f"added: {r.get('added_count',0)}  removed: {r.get('removed_count',0)}  status_changed: {r.get('status_changed_count',0)}")
+    for a in r.get("added", [])[:20]:
+        print(f"  + {a.get('id'):40s} [{a.get('status','?')}] {a.get('name','')[:50]}")
+    for a in r.get("removed", [])[:20]:
+        print(f"  - {a.get('id'):40s} [{a.get('status','?')}] {a.get('name','')[:50]}")
+    for a in r.get("status_changed", [])[:30]:
+        print(f"  ~ {a.get('id'):40s} {a.get('from','?')} → {a.get('to','?')}")
+
+
+def cmd_note(args: list[str]) -> None:
+    """hearth note <feature_id> <body> — append operator note."""
+    if len(args) < 2:
+        print("usage: hearth note <feature_id> <body>", file=sys.stderr); sys.exit(2)
+    fid = args[0]
+    body = " ".join(args[1:])
+    r = _req("POST", f"/features/{urllib.parse.quote(fid)}/notes", body={"body": body, "author": os.environ.get("USER", "operator")})
+    print(r)
+
+
+def cmd_logs(args: list[str]) -> None:
+    """hearth logs <feature_id> — docker-log-greps for a feature's events.
+    Runs `docker logs hearth-agents-agent-1 --tail 5000` via ssh + greps
+    for the feature_id. HEARTH_SSH_HOST override respected."""
+    if not args:
+        print("usage: hearth logs <feature_id>", file=sys.stderr); sys.exit(2)
+    import subprocess
+    host = os.environ.get("HEARTH_SSH_HOST", "administrator@gateway-01")
+    ssh_key = os.environ.get("HEARTH_SSH_KEY", os.path.expanduser("~/.ssh/macaroni"))
+    cmd = [
+        "ssh", "-i", ssh_key, host,
+        f"docker logs hearth-agents-agent-1 --tail 5000 2>&1 | grep -F {args[0]} | tail -80",
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+    if r.returncode != 0:
+        print(f"logs fetch failed:\n{r.stderr[:400]}", file=sys.stderr); sys.exit(1)
+    print(r.stdout or "(no matching log lines)")
+
+
 def cmd_plan(args: list[str]) -> None:
     """hearth plan "<goal>" [count=5] [repo=hearth]
     Returns a list of Feature drafts; prompts before queuing any."""
@@ -567,6 +610,7 @@ COMMANDS = {
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
     "top": cmd_top, "debug": cmd_debug, "doctor": cmd_doctor,
     "labels": cmd_labels, "template": cmd_template, "plan": cmd_plan,
+    "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
 }
 
 
