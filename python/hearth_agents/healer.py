@@ -232,6 +232,29 @@ async def run_healer(backlog: Backlog) -> None:
                 healed.append(f"{f.id} (attempt {f.heal_attempts}/{HEAL_MAX_ATTEMPTS})")
                 log.info("healer_reset", id=f.id, attempt=f.heal_attempts, reason=reason[:120])
 
+                # Auto-trigger multi-agent debate when the healer has already
+                # tried once (research #3816). The theory: if a single-model
+                # retry under new hints keeps failing, parallel-diverse models
+                # on the same prompt produces a better output distribution
+                # than sequential-diverse retries. Fire-and-forget HTTP POST
+                # to our own /debate endpoint. Budget-capped per feature.
+                if f.heal_attempts == 2:
+                    try:
+                        import urllib.request
+                        from .config import settings as _s
+                        req = urllib.request.Request(
+                            f"http://127.0.0.1:{_s.server_port}/features/{f.id}/debate",
+                            method="POST",
+                        )
+                        # Don't await response; debate is expensive (~30-60s).
+                        # Fire in a background thread via asyncio.
+                        asyncio.create_task(asyncio.to_thread(
+                            lambda: urllib.request.urlopen(req, timeout=120).read()
+                        ))
+                        log.info("healer_auto_debate_triggered", id=f.id, heal_attempts=f.heal_attempts)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("healer_auto_debate_failed", id=f.id, err=str(e)[:200])
+
             # Identify features that just hit the ceiling for escalation.
             for f in backlog.features:
                 if f.status == "blocked" and f.heal_attempts == HEAL_MAX_ATTEMPTS:

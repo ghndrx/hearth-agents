@@ -403,6 +403,87 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "status_changed": status_changed,
         }
 
+    @app.post("/webhooks/test")
+    async def webhooks_test() -> dict[str, Any]:
+        """Fire a canned payload at ``settings.outbound_transition_webhook_url``.
+        Confirms your outbound-webhook receiver is reachable before wiring
+        it to live traffic. Returns {ok, status_code, elapsed_ms} or an
+        error. No side effects beyond the POST."""
+        if not settings.outbound_transition_webhook_url:
+            raise HTTPException(status_code=400, detail="outbound_transition_webhook_url not configured")
+        import httpx
+        import time as _t
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "feature_id": "webhook-test",
+            "from": "pending",
+            "to": "done",
+            "reason": "test ping from /webhooks/test",
+            "actor": "operator",
+            "prompts_version": "test",
+        }
+        start = _t.time()
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(settings.outbound_transition_webhook_url, json=payload)
+        except httpx.HTTPError as e:
+            return {"ok": False, "error": str(e)[:200]}
+        return {
+            "ok": 200 <= r.status_code < 300,
+            "status_code": r.status_code,
+            "elapsed_ms": int((_t.time() - start) * 1000),
+            "body": r.text[:200],
+        }
+
+    @app.post("/backlog/import-markdown")
+    async def backlog_import_markdown(payload: dict[str, Any]) -> dict[str, Any]:
+        """Parse a markdown-table roadmap into Features.
+
+        Body: {"markdown": "...", "mode": "merge|replace"}. Expected
+        header row: ``| id | name | description | priority | repos | kind |``
+        Extra columns are ignored. ``priority`` and ``kind`` default when
+        absent. Perfect for pasting a quarterly plan from a Google Doc
+        into the system without hand-editing JSON.
+        """
+        md = payload.get("markdown", "")
+        mode = payload.get("mode") or "merge"
+        if not md.strip():
+            raise HTTPException(status_code=400, detail="markdown body required")
+        if mode not in ("merge", "replace"):
+            raise HTTPException(status_code=400, detail="mode must be merge|replace")
+        # Crude but sufficient: find the header row, split the body on |.
+        lines = [line.strip() for line in md.splitlines() if line.strip().startswith("|")]
+        if len(lines) < 3:
+            raise HTTPException(status_code=400, detail="need at least header + separator + one data row")
+        header = [c.strip().lower() for c in lines[0].strip("|").split("|")]
+        # Skip the separator row (| --- | --- |).
+        data_rows = [
+            [c.strip() for c in line.strip("|").split("|")]
+            for line in lines[2:]
+        ]
+        col_ix = {name: i for i, name in enumerate(header)}
+        if "id" not in col_ix or "name" not in col_ix or "description" not in col_ix:
+            raise HTTPException(status_code=400, detail="header must include id, name, description")
+        from .backlog import Feature
+        features: list[dict[str, Any]] = []
+        for row in data_rows:
+            def _c(name: str, default: str = "") -> str:
+                i = col_ix.get(name)
+                return row[i] if i is not None and i < len(row) else default
+            if not _c("id") or not _c("name") or not _c("description"):
+                continue
+            features.append({
+                "id": _c("id"),
+                "name": _c("name"),
+                "description": _c("description"),
+                "priority": _c("priority", "medium") or "medium",
+                "repos": [r.strip() for r in (_c("repos", "hearth") or "hearth").split(",")],
+                "kind": _c("kind", "feature") or "feature",
+            })
+        resp = await backlog_import({"features": features, "mode": mode})
+        resp["parsed_rows"] = len(features)
+        return resp
+
     @app.post("/backlog/import")
     async def backlog_import(payload: dict[str, Any]) -> dict[str, Any]:
         """Merge an exported backlog into the live one. Body:
