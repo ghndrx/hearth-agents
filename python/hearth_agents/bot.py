@@ -283,6 +283,21 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             lines.append(f"\nskipped: {len(skip)} ({skip[0][:100] if skip else ''})")
         await msg.answer("\n".join(lines)[:4000])
 
+    @dp.message(Command("deploy"))
+    async def _deploy(msg: Message) -> None:
+        """Trigger the safe-deploy script on the operator's machine.
+        Bot just reports it can't do this from inside the container —
+        the CLI runs on the host for SSH access. This command exists
+        to surface that cleanly instead of leaving the operator
+        guessing whether deploy is available from chat."""
+        await msg.answer(
+            "Deploy from chat isn't wired — the bot runs inside the "
+            "container and can't SSH back out. Run from your mac:\n"
+            "  `./scripts/hearth deploy`\n\n"
+            "It verifies build success + /health before declaring done, "
+            "so you won't silently ship broken builds."
+        )
+
     @dp.message(Command("debate"))
     async def _debate(msg: Message, command: CommandObject) -> None:
         fid = (command.args or "").strip()

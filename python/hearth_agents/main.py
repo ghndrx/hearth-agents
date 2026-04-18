@@ -19,6 +19,7 @@ from .config import settings
 from .archive_task import run_archive
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
+from .nightly_summary import run_nightly_summary
 from .research_watch import run_research_watch
 from .scheduler import run_scheduler
 from .self_improvement_seeder import run_self_improvement_seeder
@@ -69,6 +70,7 @@ async def _main() -> None:
         "self_improvement_seeder": lambda: run_self_improvement_seeder(backlog),
         "snapshot": lambda: run_snapshot(backlog),
         "research_watch": lambda: run_research_watch(),
+        "nightly_summary": lambda: run_nightly_summary(backlog),
     }
     bg_tasks: dict[str, tuple[asyncio.Task, Any]] = {}
     for name, factory in factories.items():

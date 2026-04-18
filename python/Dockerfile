@@ -28,6 +28,15 @@ RUN git config --global --add safe.directory '*' \
 WORKDIR /app
 COPY --from=builder /app /app
 
+# Stamp build info so /build endpoint can report expected-vs-running.
+# Accepts --build-arg GIT_SHA=... GIT_BRANCH=... from the host; the
+# ``scripts/hearth deploy`` CLI injects them automatically.
+ARG GIT_SHA=unknown
+ARG GIT_BRANCH=unknown
+RUN echo "git_sha=${GIT_SHA}" > /app/BUILD_INFO \
+    && echo "git_branch=${GIT_BRANCH}" >> /app/BUILD_INFO \
+    && echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /app/BUILD_INFO
+
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 VOLUME ["/data", "/repos"]
 EXPOSE 8000

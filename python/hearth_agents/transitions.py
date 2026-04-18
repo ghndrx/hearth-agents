@@ -17,10 +17,40 @@ import os
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from .logger import log
 
 _DEFAULT_PATH = Path(os.environ.get("TRANSITIONS_PATH", "/data/transitions.jsonl"))
+
+# In-memory subscriber fan-out for Server-Sent Events. Each subscriber
+# gets its own asyncio.Queue; record_transition publishes to all of them
+# synchronously-quickly. Not durable — a dropped subscriber misses
+# events between disconnect and reconnect; kanban reconciles via
+# /features on reconnect so that's fine.
+_subscribers: list = []  # list[asyncio.Queue]
+
+
+def subscribe() -> Any:  # type: ignore[valid-type]
+    """Called by the /events SSE handler to get a per-connection queue."""
+    import asyncio as _asyncio
+    q = _asyncio.Queue(maxsize=100)
+    _subscribers.append(q)
+    return q
+
+
+def _publish(entry: dict) -> None:
+    """Fan out one transition to every live subscriber. Non-blocking;
+    a subscriber that can't keep up (queue full) silently drops."""
+    for q in list(_subscribers):
+        try:
+            q.put_nowait(entry)
+        except Exception:  # noqa: BLE001
+            # Full queue or closed; drop from the subscriber list.
+            try:
+                _subscribers.remove(q)
+            except ValueError:
+                pass
 
 
 @lru_cache(maxsize=1)
@@ -107,6 +137,9 @@ def record_transition(
             f.write(json.dumps(entry) + "\n")
     except OSError as e:
         log.warning("transition_log_write_failed", err=str(e)[:200], feature=feature_id)
+
+    # Fan out to live SSE subscribers so the kanban updates immediately.
+    _publish(entry)
 
     # Fan out to the outbound webhook with at-least-once delivery via a
     # small in-memory retry queue. A dropped subscriber doesn't lose

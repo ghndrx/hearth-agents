@@ -528,8 +528,18 @@ function kanban() {
     },
     init() {
       this.refresh();
-      setInterval(() => this.refresh(), 10000);
+      // Poll every 30s as a backstop for SSE drops; SSE handles real-time.
+      setInterval(() => this.refresh(), 30000);
       setInterval(() => { this.sinceLabel = Math.floor((Date.now() - this.lastRefresh) / 1000).toString(); }, 1000);
+      // Subscribe to Server-Sent Events so transitions land instantly
+      // instead of waiting for the next poll. Auto-reconnects on drop.
+      try {
+        const src = new EventSource('/events');
+        src.addEventListener('transition', () => {
+          this.refresh();  // fetch fresh /features on any transition
+        });
+        src.onerror = () => { /* browser auto-reconnects */ };
+      } catch (e) { /* EventSource unsupported; polling fallback covers us */ }
       document.addEventListener('keydown', (e) => {
         const tag = (e.target && e.target.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return;

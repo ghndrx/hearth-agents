@@ -282,6 +282,72 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         no frontend/ directory; Alpine.js via CDN does the rendering."""
         return HTMLResponse(KANBAN_HTML)
 
+    @app.get("/events")
+    async def events() -> Any:
+        """Server-Sent Events stream. Clients (kanban) subscribe and
+        get one event per transition in ~real time instead of polling
+        /features every 10s. Also sends keepalive pings every 15s so
+        the connection doesn't idle-close behind proxies.
+
+        Uses a simple in-memory subscriber queue — there's no
+        durability; missed events between connection drops are not
+        backfilled. Kanban re-fetches /features on reconnect anyway.
+        """
+        from fastapi.responses import StreamingResponse
+        from .transitions import subscribe as _subscribe
+
+        async def stream() -> Any:
+            queue = _subscribe()
+            yield "retry: 2000\n\n"
+            try:
+                while True:
+                    try:
+                        entry = await asyncio.wait_for(queue.get(), timeout=15)
+                        import json as _json
+                        yield f"event: transition\ndata: {_json.dumps(entry)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                pass
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/build")
+    async def build_info() -> dict[str, Any]:
+        """Return git sha + build timestamp + image digest so the
+        operator can compare expected-vs-running code. Reads from
+        /app/BUILD_INFO (written by Dockerfile) when present, falls
+        back to .git inspection. An answer of ``unknown`` for git_sha
+        means the running process was started outside docker build."""
+        import os
+        from pathlib import Path as _P
+        info: dict[str, Any] = {"git_sha": "unknown", "git_branch": "unknown", "built_at": "unknown"}
+        bi = _P("/app/BUILD_INFO")
+        if bi.exists():
+            try:
+                for line in bi.read_text().splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        info[k.strip().lower()] = v.strip()
+            except OSError:
+                pass
+        # Fallback: read from source-tree .git if mounted.
+        if info["git_sha"] == "unknown":
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd="/app", capture_output=True, text=True, timeout=5, check=False,
+                )
+                if r.returncode == 0:
+                    info["git_sha"] = r.stdout.strip()[:12]
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        info["process_started_at"] = os.environ.get("PROCESS_STARTED_AT", "unknown")
+        from .transitions import prompts_version
+        info["prompts_version"] = prompts_version()
+        return info
+
     @app.get("/config")
     async def config_view() -> dict[str, Any]:
         """Runtime configuration operators care about: loop dials, prompts

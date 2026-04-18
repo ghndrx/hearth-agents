@@ -185,8 +185,21 @@ def cmd_deploy(args: list[str]) -> None:
         print(f"pull failed ({rc}):\n{out[-1000:]}", file=sys.stderr); sys.exit(1)
     print(out.strip().split("\n")[-1])
 
-    print("=> building (this can take a few minutes)")
-    rc, out = _ssh(f"cd {remote_dir} && docker compose build agent", timeout=900)
+    # Fetch git sha + branch to stamp into the image.
+    sha_rc, sha_out = _ssh(f"cd {remote_dir} && git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD")
+    git_sha = "unknown"
+    git_branch = "unknown"
+    if sha_rc == 0:
+        parts = sha_out.strip().splitlines()
+        if len(parts) >= 2:
+            git_sha, git_branch = parts[0].strip(), parts[1].strip()
+
+    print(f"=> building {git_sha}@{git_branch} (this can take a few minutes)")
+    rc, out = _ssh(
+        f"cd {remote_dir} && GIT_SHA={git_sha} GIT_BRANCH={git_branch} "
+        f"docker compose build --build-arg GIT_SHA={git_sha} --build-arg GIT_BRANCH={git_branch} agent",
+        timeout=900,
+    )
     if rc != 0 or "failed to solve" in out or "ERROR" in out:
         err = "\n".join(line for line in out.splitlines() if any(s in line for s in ("ERROR", "failed", "error:")))
         print(f"build failed:\n{err[-2000:]}", file=sys.stderr); sys.exit(2)
