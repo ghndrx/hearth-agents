@@ -225,6 +225,69 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from .prompt_analyzer import analyze
         return analyze()
 
+    @app.get("/backlog/export")
+    async def backlog_export() -> list[dict[str, Any]]:
+        """Full backlog snapshot as JSON. For migration between instances
+        or diff against an earlier export. Use ``jq > backlog.json`` to
+        save locally. NOT filtered — exports archive-eligible entries
+        too, so a re-import restores exact state."""
+        from dataclasses import asdict
+        return [asdict(f) for f in backlog.features]
+
+    @app.post("/backlog/import")
+    async def backlog_import(payload: dict[str, Any]) -> dict[str, Any]:
+        """Merge an exported backlog into the live one. Body:
+          {"features": [...], "mode": "merge"|"replace"}
+
+        - merge (default): each feature added via Backlog.add (skips
+          duplicates, sanitizes, persists). Returns per-entry
+          add/skip outcome.
+        - replace: wipes the current backlog and replaces entirely.
+          DESTRUCTIVE — use for disaster recovery, not routine sync.
+        """
+        from .backlog import Feature
+        mode = payload.get("mode") or "merge"
+        features_raw = payload.get("features") or []
+        if not isinstance(features_raw, list):
+            raise HTTPException(status_code=400, detail="features must be a list")
+        if mode not in ("merge", "replace"):
+            raise HTTPException(status_code=400, detail="mode must be merge|replace")
+        imported = 0
+        skipped = 0
+        if mode == "replace":
+            backlog.features = []
+        for item in features_raw:
+            if not isinstance(item, dict) or not item.get("id"):
+                skipped += 1
+                continue
+            # Strip fields not on the dataclass so a schema drift between
+            # versions doesn't crash the import.
+            valid_keys = {"id", "name", "description", "priority", "repos",
+                          "research_topics", "discord_parity", "status",
+                          "created_at", "self_improvement", "heal_attempts",
+                          "heal_hint", "parent_id", "planner_estimate_lines",
+                          "kind", "risk_tier", "depends_on", "repro_command",
+                          "acceptance_criteria"}
+            clean = {k: v for k, v in item.items() if k in valid_keys}
+            try:
+                feature = Feature(**clean)
+            except TypeError as e:
+                log.warning("import_feature_invalid", id=item.get("id"), err=str(e)[:160])
+                skipped += 1
+                continue
+            if mode == "replace":
+                backlog.features.append(feature)
+                imported += 1
+            else:
+                if backlog.add(feature):
+                    imported += 1
+                else:
+                    skipped += 1
+        if mode == "replace":
+            backlog.save()
+        log.info("backlog_imported", mode=mode, imported=imported, skipped=skipped)
+        return {"ok": True, "mode": mode, "imported": imported, "skipped": skipped}
+
     @app.get("/replay/{feature_id}")
     async def replay_endpoint(feature_id: str) -> dict[str, Any]:
         """Read-only replay analytics for a feature: every recorded

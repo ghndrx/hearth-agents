@@ -39,8 +39,18 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
     @dp.message(Command("start"))
     async def _start(msg: Message) -> None:
         await msg.answer(
-            "Hearth agent online. Commands: /status, /features, "
-            "/enqueue <id> | <name> | <desc>. Anything else is a one-shot query."
+            "Hearth agent online. Commands:\n"
+            "  /status — backlog counts\n"
+            "  /stats — full /stats incl. block reasons\n"
+            "  /features — list every feature\n"
+            "  /enqueue <id> | <name> | <desc> — queue a feature\n"
+            "  /bug <id> | <name> | <desc> | <repro_cmd> — queue a bug\n"
+            "  /approve <id> — mark blocked → done (human verified)\n"
+            "  /retry <id> — reset heal + flip to pending\n"
+            "  /nuke <id> — remove from backlog\n"
+            "  /cost — total spend + top 3 features by cost\n"
+            "  /who — per-worker current feature\n"
+            "Anything else is a one-shot query."
         )
 
     @dp.message(Command("status"))
@@ -66,6 +76,101 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             await msg.answer(f"Feature {feature.id} already exists.")
             return
         await msg.answer(f"Queued: {feature.id}")
+
+    @dp.message(Command("stats"))
+    async def _stats(msg: Message) -> None:
+        from .loop import circuit_state, watchdog_state
+        stats = backlog.stats()
+        reasons: dict[str, int] = {}
+        for f in backlog.features:
+            if f.status != "blocked":
+                continue
+            key = (f.heal_hint or "(no hint)")[:50].strip().rstrip(":")
+            reasons[key] = reasons.get(key, 0) + 1
+        top = sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
+        cb = circuit_state()
+        workers = watchdog_state()
+        text = [
+            "*Backlog*",
+            *[f"  {k}: {v}" for k, v in stats.items()],
+            "",
+            f"*Circuit*: open={cb['open']} rate={cb.get('block_rate', 0):.0%}",
+            "*Active workers*: " + str(len(workers)),
+        ]
+        if top:
+            text += ["", "*Top block reasons*"] + [f"  {c}×  {r[:60]}" for r, c in top]
+        await msg.answer("\n".join(text))
+
+    @dp.message(Command("bug"))
+    async def _bug(msg: Message, command: CommandObject) -> None:
+        parts = [p.strip() for p in (command.args or "").split("|")]
+        if len(parts) < 4:
+            await msg.answer("Usage: /bug <id> | <name> | <desc> | <repro_command>")
+            return
+        feature = Feature(
+            id=parts[0], name=parts[1], description=parts[2],
+            kind="bug", repro_command=parts[3], priority="high",
+        )
+        if not backlog.add(feature):
+            await msg.answer(f"Bug {feature.id} already exists.")
+            return
+        await msg.answer(f"Queued bug: {feature.id}")
+
+    @dp.message(Command("approve"))
+    async def _approve(msg: Message, command: CommandObject) -> None:
+        fid = (command.args or "").strip()
+        if not fid:
+            await msg.answer("Usage: /approve <feature_id>")
+            return
+        ok, message = backlog.action(fid, "approve")
+        await msg.answer(message)
+
+    @dp.message(Command("retry"))
+    async def _retry(msg: Message, command: CommandObject) -> None:
+        fid = (command.args or "").strip()
+        if not fid:
+            await msg.answer("Usage: /retry <feature_id>")
+            return
+        ok, message = backlog.action(fid, "retry")
+        await msg.answer(message)
+
+    @dp.message(Command("nuke"))
+    async def _nuke(msg: Message, command: CommandObject) -> None:
+        fid = (command.args or "").strip()
+        if not fid:
+            await msg.answer("Usage: /nuke <feature_id>")
+            return
+        ok, message = backlog.action(fid, "nuke")
+        await msg.answer(message)
+
+    @dp.message(Command("cost"))
+    async def _cost(msg: Message) -> None:
+        from .cost_analytics import analyze_costs
+        d = analyze_costs()
+        lines = [
+            f"Total spend: ${d['total_cost_usd']:.3f}",
+            f"Tokens: {d['total_input_tokens']:,} in / {d['total_output_tokens']:,} out",
+            "",
+            "Top 3 features by cost:",
+        ]
+        for f in d.get("top_features", [])[:3]:
+            lines.append(f"  ${f['cost_usd']:.4f}  {f['attempts']}× — {f['feature_id']}")
+        if d.get("daily"):
+            today = d["daily"][-1]
+            lines += ["", f"Today: ${today['cost_usd']:.4f} ({today['day']})"]
+        await msg.answer("\n".join(lines))
+
+    @dp.message(Command("who"))
+    async def _who(msg: Message) -> None:
+        from .loop import watchdog_state
+        w = watchdog_state()
+        if not w:
+            await msg.answer("No active workers.")
+            return
+        lines = ["Active workers:"]
+        for wid, info in sorted(w.items(), key=lambda kv: int(kv[0])):
+            lines.append(f"  w{wid}: {info['feature']} ({info['age_sec']}s ago)")
+        await msg.answer("\n".join(lines))
 
     # Any non-command text becomes a one-shot agent invocation.
     @dp.message(F.text & ~F.text.startswith("/"))

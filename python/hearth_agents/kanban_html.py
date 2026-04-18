@@ -86,7 +86,11 @@ KANBAN_HTML = r"""<!doctype html>
 </head>
 <body x-data="kanban()" x-init="init()">
   <header>
-    <h1>hearth-agents <span style="color: var(--muted); font-weight: 400;">kanban</span></h1>
+    <h1>hearth-agents <span style="color: var(--muted); font-weight: 400;">kanban</span>
+      <template x-for="w in workerBadges" :key="w.id">
+        <span class="repo" :title="'worker ' + w.id + ' · ' + w.age + 's since beat'" :style="w.age < 120 ? 'background:var(--done);color:#fff;margin-left:6px;' : w.age < 600 ? 'background:var(--pri-high);color:#fff;margin-left:6px;' : 'background:var(--blocked);color:#fff;margin-left:6px;'" x-text="'w' + w.id + ':' + (w.feature || '-').slice(0, 28)"></span>
+      </template>
+    </h1>
     <div class="bulk">
       <input type="search" placeholder="filter id / name / repo..." x-model="filterText" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:12px;width:220px;" />
       <span class="meta" x-text="'refreshed ' + sinceLabel + 's ago'"></span>
@@ -342,6 +346,14 @@ function kanban() {
     ],
     get blockedFeatures() { return this.features.filter(f => f.status === 'blocked'); },
     get escalatedFeatures() { return this.features.filter(f => f.status === 'blocked' && (f.heal_attempts || 0) >= 3); },
+    get workerBadges() {
+      const w = (this.stats && this.stats.workers) || {};
+      return Object.keys(w).sort((a, b) => Number(a) - Number(b)).map(id => ({
+        id,
+        feature: w[id].feature || '',
+        age: Number(w[id].age_sec) || 0,
+      }));
+    },
     init() {
       this.refresh();
       setInterval(() => this.refresh(), 10000);
