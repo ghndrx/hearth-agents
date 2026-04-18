@@ -306,6 +306,51 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_top(args: list[str]) -> None:
+    """Live htop-style dashboard: backlog stats, active workers with
+    beat age + last error, today's spend + block-rate, updated every
+    5s. Ctrl-c to exit."""
+    import time
+    while True:
+        try:
+            stats = _req("GET", "/stats")
+            cost = _req("GET", "/cost-analytics")
+            cfg = _req("GET", "/config")
+            # ANSI clear-screen + home.
+            sys.stdout.write("\x1b[2J\x1b[H")
+            sys.stdout.write("hearth top · ctrl-c to exit\n\n")
+            sys.stdout.write(f"prompts: {cfg.get('prompts_version','?')}  workers: {cfg.get('loop',{}).get('workers','?')}/{cfg.get('loop',{}).get('workers_max','?')}\n\n")
+            s = stats.get("stats", {})
+            sys.stdout.write(f"backlog: done={s.get('done',0):4d}  pending={s.get('pending',0):3d}  implementing={s.get('implementing',0):2d}  blocked={s.get('blocked',0):3d}\n")
+            r24 = stats.get("recent_24h", {})
+            br = (r24.get("blocked") or 0) / max(1, (r24.get("done", 0) or 0) + (r24.get("blocked", 0) or 0)) * 100
+            sys.stdout.write(f"24h:     done={r24.get('done',0):4d}  blocked={r24.get('blocked',0):3d}  block_rate={br:.1f}%\n\n")
+            sys.stdout.write(f"spend:   ${cost.get('total_cost_usd',0):.4f} total  p50 {cost.get('duration_percentiles',{}).get('p50',0)}s  p95 {cost.get('duration_percentiles',{}).get('p95',0)}s\n\n")
+            workers = stats.get("workers") or {}
+            sys.stdout.write(f"workers ({len(workers)} active):\n")
+            for wid, info in sorted(workers.items(), key=lambda kv: int(kv[0])):
+                age = info.get("age_sec", 0)
+                color = "\x1b[32m" if age < 120 else "\x1b[33m" if age < 600 else "\x1b[31m"
+                sys.stdout.write(f"  {color}w{wid}\x1b[0m beat {age:4d}s  feature: {info.get('feature','-')}\n")
+                err = info.get("last_error")
+                if err:
+                    sys.stdout.write(f"        last_err({err.get('age_sec',0)}s ago on {err.get('feature_id','?')}): {err.get('error','')[:80]}\n")
+            sys.stdout.write("\n")
+            reasons = stats.get("block_reasons_top10") or []
+            if reasons:
+                sys.stdout.write("top blocks:\n")
+                for r in reasons[:5]:
+                    sys.stdout.write(f"  {r['count']:3d}×  {r['reason'][:70]}\n")
+            sys.stdout.flush()
+            time.sleep(5)
+        except KeyboardInterrupt:
+            sys.stdout.write("\n")
+            return
+        except Exception as e:
+            sys.stdout.write(f"\nerror: {e} — retrying in 5s\n")
+            time.sleep(5)
+
+
 def cmd_watch(args: list[str]) -> None:
     """Tail /events. Prints one human-readable line per transition.
     Reconnects automatically on drop. Use ctrl-c to exit."""
@@ -379,6 +424,7 @@ COMMANDS = {
     "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
+    "top": cmd_top,
 }
 
 

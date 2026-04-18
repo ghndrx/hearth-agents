@@ -38,6 +38,7 @@ _intervals: dict[str, int] = {
     "nightly_summary": 86400,
     "transition_compaction": 86400,
     "budget_alarm": 3600,
+    "drift_canary": 600,
 }
 
 

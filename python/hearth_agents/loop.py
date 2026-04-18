@@ -388,6 +388,25 @@ def _note_usage(provider: str, input_tokens: int, output_tokens: int) -> None:
             olog.pop(0)
 
 
+def _snapshot_prompt(prompt: str) -> str:
+    """Persist the full prompt to /data/prompts/<sha12>.txt and return
+    the sha. Idempotent — same prompt reuses the same file. Lets
+    /replay/{id} present the exact text the agent received for each
+    attempt without bloating attempts.jsonl with duplicated full
+    prompts. Best-effort: write failures degrade to empty sha."""
+    import hashlib
+    from pathlib import Path as _P
+    sha = hashlib.sha256(prompt.encode("utf-8", errors="replace")).hexdigest()[:12]
+    path = _P(f"/data/prompts/{sha}.txt")
+    if not path.exists():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(prompt, encoding="utf-8")
+        except OSError:
+            return ""
+    return sha
+
+
 def _append_attempt_log(
     feature_id: str,
     attempt: int,
@@ -397,6 +416,7 @@ def _append_attempt_log(
     output_tokens: int,
     duration_sec: float = 0.0,
     worker_id: int = 0,
+    prompt_sha: str = "",
 ) -> None:
     """Append one line per attempt to ``/data/attempts.jsonl``. Foundation
     for the debugging-session-replay tooling (research #3807) — captures
@@ -429,6 +449,7 @@ def _append_attempt_log(
         "input_tokens": int(input_tokens),
         "output_tokens": int(output_tokens),
         "duration_sec": round(float(duration_sec), 2),
+        "prompt_sha": prompt_sha,
         "tool_calls": tool_trace[:200],  # cap so a stuck loop can't bloat
     }
     path = _P("/data/attempts.jsonl")
@@ -1191,6 +1212,7 @@ async def run_once(
                 feature.id, attempt, active_provider, result, in_tok, out_tok,
                 duration_sec=_time_attempt.time() - _attempt_started,
                 worker_id=worker_id,
+                prompt_sha=_snapshot_prompt(prompt),
             )
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
@@ -1503,12 +1525,21 @@ async def _worker(
             await asyncio.sleep(wait)
             continue
 
+        # Operator override: settings.force_provider pins every call
+        # to one model. Bypasses ping-pong + cooldowns — if force=fallback
+        # and fallback is cooled, we STILL use fallback (operator's
+        # explicit choice). Useful for A/B ("is kimi the problem?") or
+        # quota-conservation lockdown.
+        force = (settings.force_provider or "").strip().lower()
+        if force in ("primary", "fallback"):
+            use_fallback = force == "fallback" and fallback_agent is not None
+            reason = f"force_provider={force}"
         # Provider selection:
         #  1. If one is cooled, use the other.
         #  2. If both are healthy and fallback is configured, ping-pong on a
         #     shared counter. Spreads load 50/50 across providers instead of
         #     dogpiling whichever is nominally "primary".
-        if primary_cool and fallback_agent is not None and not fallback_cool:
+        elif primary_cool and fallback_agent is not None and not fallback_cool:
             use_fallback = True
             reason = "primary_cooled"
         elif fallback_cool:

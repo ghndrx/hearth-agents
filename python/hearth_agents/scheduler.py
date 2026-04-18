@@ -107,7 +107,7 @@ def _fire(entry: ScheduleEntry, backlog: Backlog) -> bool:
     return added
 
 
-async def run_scheduler(backlog: Backlog) -> None:
+async def run_scheduler(backlog: Backlog) -> None:  # noqa: D401
     """Background task. Re-reads the schedule file each tick so operators
     can edit it live without a restart."""
     from .heartbeat import beat

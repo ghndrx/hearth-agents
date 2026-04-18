@@ -18,6 +18,7 @@ from .bot import run_bot
 from .config import settings
 from .archive_task import run_archive
 from .budget_alarm import run_budget_alarm
+from .drift_canary import run_drift_canary
 from .digest import run_digest
 from .drift_alarm import run_drift_alarm
 from .nightly_summary import run_nightly_summary
@@ -75,6 +76,7 @@ async def _main() -> None:
         "nightly_summary": lambda: run_nightly_summary(backlog),
         "transition_compaction": lambda: run_transition_compaction(),
         "budget_alarm": lambda: run_budget_alarm(),
+        "drift_canary": lambda: run_drift_canary(),
     }
     bg_tasks: dict[str, tuple[asyncio.Task, Any]] = {}
     for name, factory in factories.items():

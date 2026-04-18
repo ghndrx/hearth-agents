@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # than Kimi (typical: Kimi Allegretto weekly is tighter than MiniMax Max
     # 5h window). Clamped to [0.0, 1.0] before use.
     minimax_bias: float = 0.5
+    # Operator override: force every ainvoke through one provider,
+    # bypassing ping-pong + cooldown + circuit-breaker routing. Useful
+    # for A/B testing ("run 1h through MiniMax only, see if Kimi is
+    # the problem") or quota-conservation mode. Empty = routing as
+    # normal. Values: "primary" | "fallback".
+    force_provider: str = ""
 
     # Server
     server_host: str = "0.0.0.0"
