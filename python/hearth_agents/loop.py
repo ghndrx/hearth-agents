@@ -346,11 +346,19 @@ def _retry_after_seconds(e: BaseException) -> float:
 # shape — but good enough to dodge the 429 flip-flop.
 _REQ_WINDOW_SEC = 5 * 60 * 60     # match Kimi 4h / MiniMax 5h window order of magnitude
 _RATE_APPROACH_HEADROOM = 0.10    # sleep when within 10% of advertised rate
+# Three independent dimensions per provider (research #3808 — proactive
+# rate-limit management). Each entry is (ts, value) — value is 1 for RPM,
+# actual token count for ITPM/OTPM. A single list per dim keeps bookkeeping
+# simple and windowing uniform; we deque-trim on every note.
 _request_ticks: dict[str, list[float]] = {"primary": [], "fallback": []}
+_input_tokens: dict[str, list[tuple[float, int]]] = {"primary": [], "fallback": []}
+_output_tokens: dict[str, list[tuple[float, int]]] = {"primary": [], "fallback": []}
 
 
 def _note_request(provider: str) -> None:
-    """Record one outgoing ainvoke so the predictor has data to work with."""
+    """Record one outgoing ainvoke so the predictor has data to work with.
+    Kept for call-site compatibility; token counts are recorded separately
+    via ``_note_usage`` after the response comes back."""
     import time as _t
     now = _t.time()
     ticks = _request_ticks.setdefault(provider, [])
@@ -360,37 +368,92 @@ def _note_request(provider: str) -> None:
         ticks.pop(0)
 
 
-def _throttle_for_rate_approach(worker_id: int) -> None:
-    """Sleep briefly (sync) when we're approaching either provider's
-    advertised limit. Synchronous sleep keeps the worker off the CPU
-    without an extra await, matching the existing rate-limit sleep
-    style; kept short (<=10s) so the worker isn't dead if traffic dries up."""
+def _note_usage(provider: str, input_tokens: int, output_tokens: int) -> None:
+    """Record post-response token counts. LangChain surfaces these on
+    AIMessage.response_metadata['token_usage']; the caller extracts and
+    passes them here. Zero-valued inputs are silently skipped (empty
+    response, typically a cancellation)."""
     import time as _t
-    limits = {"primary": settings.minimax_rate_limit, "fallback": settings.minimax_rate_limit}
-    # Only apply predictor when the limit is positive AND config has given
-    # us a ceiling to predict against. Default minimax_rate_limit is 4500.
-    for provider, limit in limits.items():
-        if limit <= 0:
-            continue
-        ticks = _request_ticks.get(provider, [])
-        if not ticks:
-            continue
-        approach = limit * (1.0 - _RATE_APPROACH_HEADROOM)
-        if len(ticks) >= approach:
-            # Linear extrapolation: remaining headroom = limit - len(ticks),
-            # window decay rate = len(ticks)/window. Sleep until one tick
-            # ages out, capped at 10s so we don't wedge the worker.
-            sleep_for = max(1.0, min(10.0, _REQ_WINDOW_SEC / max(1, len(ticks))))
-            log.info(
-                "rate_approach_throttle",
-                worker=worker_id,
-                provider=provider,
-                ticks_in_window=len(ticks),
-                limit=limit,
-                sleep_sec=round(sleep_for, 1),
-            )
-            _t.sleep(sleep_for)
-            return  # one throttle per iteration is enough
+    now = _t.time()
+    cutoff = now - _REQ_WINDOW_SEC
+    if input_tokens > 0:
+        ilog = _input_tokens.setdefault(provider, [])
+        ilog.append((now, input_tokens))
+        while ilog and ilog[0][0] < cutoff:
+            ilog.pop(0)
+    if output_tokens > 0:
+        olog = _output_tokens.setdefault(provider, [])
+        olog.append((now, output_tokens))
+        while olog and olog[0][0] < cutoff:
+            olog.pop(0)
+
+
+def _extract_token_usage(result: Any) -> tuple[int, int]:
+    """Walk a LangChain agent result's messages for AIMessage.response_metadata
+    token_usage and sum input/output. Returns (0, 0) on any extraction
+    failure — the throttle gracefully degrades to RPM-only when tokens
+    aren't available."""
+    total_in = 0
+    total_out = 0
+    try:
+        for m in result.get("messages", []) or []:
+            meta = getattr(m, "response_metadata", None) or {}
+            usage = meta.get("token_usage") or meta.get("usage") or {}
+            total_in += int(usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0) or 0)
+            total_out += int(usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0, 0
+    return total_in, total_out
+
+
+def _throttle_for_rate_approach(worker_id: int) -> None:
+    """Sleep briefly (sync) when ANY of RPM / ITPM / OTPM approaches the
+    provider's advertised limit (research #3808). Three independent
+    dimensions means the worker holds off on whichever axis is stressed:
+    a feature with a massive prompt will throttle on ITPM even when RPM
+    is fine, and vice versa.
+
+    Short sleep (1-10s) — the alternative is a 15m cooldown floor after
+    hitting a 429, which is far worse for tail latency. Returns on first
+    dimension that trips, doesn't stack sleeps."""
+    import time as _t
+    # Ceiling for each dimension. RPM from settings. Token ceilings are
+    # provider-published: Kimi coding endpoint and MiniMax Plus both
+    # advertise ~1M token/min on input and ~200K/min on output. Configurable
+    # via settings once we have real observations; the defaults below are
+    # conservative to stay well under any realistic plan.
+    per_dim: list[tuple[str, dict[str, int], dict[str, list]]] = [
+        ("RPM", {"primary": settings.minimax_rate_limit, "fallback": settings.minimax_rate_limit}, _request_ticks),
+        ("ITPM", {"primary": 800_000, "fallback": 800_000}, _input_tokens),  # type: ignore[dict-item]
+        ("OTPM", {"primary": 150_000, "fallback": 150_000}, _output_tokens),  # type: ignore[dict-item]
+    ]
+    for dim_name, limits, log_ in per_dim:
+        for provider, limit in limits.items():
+            if limit <= 0:
+                continue
+            entries = log_.get(provider, [])
+            if not entries:
+                continue
+            # For RPM the list is floats (count=1 each); for token dims it's
+            # (ts, int). Sum appropriately.
+            if dim_name == "RPM":
+                value = len(entries)
+            else:
+                value = sum(v for _, v in entries)
+            approach = limit * (1.0 - _RATE_APPROACH_HEADROOM)
+            if value >= approach:
+                sleep_for = max(1.0, min(10.0, _REQ_WINDOW_SEC / max(1, value)))
+                log.info(
+                    "rate_approach_throttle",
+                    worker=worker_id,
+                    provider=provider,
+                    dimension=dim_name,
+                    value=int(value),
+                    limit=limit,
+                    sleep_sec=round(sleep_for, 1),
+                )
+                _t.sleep(sleep_for)
+                return
 
 
 # Stuck-worker watchdog: each worker reports its last progress moment
@@ -724,6 +787,11 @@ async def run_once(
                 timeout=settings.per_feature_timeout_sec,
             )
             _beat(worker_id, feature.id)
+            # Record token usage for the multi-dim rate-limit predictor.
+            # Zero counts (e.g. when LangChain wraps a streaming response
+            # without aggregating usage) are silently skipped.
+            in_tok, out_tok = _extract_token_usage(result)
+            _note_usage(active_provider, in_tok, out_tok)
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
             # Rescue stray diffs: if the agent wrote files in a worktree but

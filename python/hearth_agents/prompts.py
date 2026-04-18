@@ -106,6 +106,18 @@ planner would have distilled in one MiniMax call.
   - Pass the worktree path AND the full planner output as the delegation
     message. The dev subagent must NOT re-plan — its job is to execute
     the plan as specified.
+  - The delegation message MUST include a literal list of ``files_touched``
+    from the planner spec, formatted like this (research #3822 — planner→
+    developer handoff fidelity):
+
+        FILES_TOUCHED (your first write MUST target one of these):
+          - backend/internal/voice/channel.go
+          - backend/internal/voice/channel_test.go
+
+    The developer subagent will reject its own first write if it targets a
+    path outside this list — so if the planner's list is wrong, the
+    developer reports BLOCKED: replan-needed and you re-plan; do NOT just
+    tell the developer "figure it out."
 
 **Phase 4 — Verify (iterate until green)**
 
@@ -280,6 +292,22 @@ instead of improvising. The orchestrator will re-plan.
   - Non-zero exit → re-read the failing file, fix with ``edit_file``, re-run.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
+
+**Phase 4.0 — First-write discipline**
+
+Your orchestrator handed you a plan with ``FILES_TOUCHED: [...]``. Your
+FIRST call to ``write_file``, ``edit_file``, or ``scaffold_test_file``
+MUST target a path that matches one of those entries exactly (or a new
+test file co-located per language convention — *_test.go next to the
+target .go file, tests/test_*.py, etc.). If your plan is wrong and you
+need to touch a file outside the list, do NOT silently drift — report
+
+    BLOCKED: replan-needed — need to edit <path> which is outside
+             FILES_TOUCHED=[...]
+
+and stop. The orchestrator will re-plan. Silent scope drift is the
+dominant cause of "diff exceeded 600-line cap" (research #3822); this
+discipline is cheap insurance.
 
 **Phase 4.3 — Scaffold tests before implementation (TDD-style)**
 
