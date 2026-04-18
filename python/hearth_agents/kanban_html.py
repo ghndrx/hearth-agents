@@ -91,6 +91,7 @@ KANBAN_HTML = r"""<!doctype html>
       <input type="search" placeholder="filter id / name / repo..." x-model="filterText" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:12px;width:220px;" />
       <span class="meta" x-text="'refreshed ' + sinceLabel + 's ago'"></span>
       <button @click="refresh()">refresh</button>
+      <button @click="openAddModal()" style="background: var(--done); color: #fff; border-color: var(--done);">+ add</button>
       <button @click="loadAnalytics()">analytics</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve all blocked</button>
     </div>
@@ -165,6 +166,45 @@ KANBAN_HTML = r"""<!doctype html>
 
   <div class="toast" x-show="toast" x-text="toast" :class="toastErr ? 'err' : ''"></div>
 
+  <template x-if="addForm">
+    <div>
+      <div class="modal-backdrop" @click="addForm = null"></div>
+      <div class="modal" style="inset: 10% 20%;">
+        <button class="close" @click="addForm = null">close</button>
+        <h2>Add feature / bug</h2>
+        <form @submit.prevent="submitAdd()" style="display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; align-items: center; font-size: 12px;">
+          <label>kind</label>
+          <select x-model="addForm.kind" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px;">
+            <option value="feature">feature</option>
+            <option value="bug">bug</option>
+          </select>
+          <label>id (kebab-case)</label>
+          <input x-model="addForm.id" required placeholder="my-new-thing" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px;" />
+          <label>name</label>
+          <input x-model="addForm.name" required placeholder="Human-readable title" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px;" />
+          <label>priority</label>
+          <select x-model="addForm.priority" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px;">
+            <option>critical</option><option>high</option><option selected>medium</option><option>low</option>
+          </select>
+          <label>repos (csv)</label>
+          <input x-model="addForm.reposCsv" placeholder="hearth" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px;" />
+          <label>description</label>
+          <textarea x-model="addForm.description" required rows="4" placeholder="What needs to be built / what's broken" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px; font-family: inherit;"></textarea>
+          <label>acceptance</label>
+          <input x-model="addForm.acceptance" placeholder="Concrete done condition (what proves it works)" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px;" />
+          <template x-if="addForm.kind === 'bug'">
+            <label>repro command</label>
+          </template>
+          <template x-if="addForm.kind === 'bug'">
+            <input x-model="addForm.repro" required placeholder="go test ./... -run TestFoo (must fail today)" style="background: #0d1117; color: var(--fg); border: 1px solid var(--border); padding: 4px 8px;" />
+          </template>
+          <div></div>
+          <div><button type="submit" style="background: var(--done); color: #fff; border: 0; padding: 6px 14px; border-radius: 3px; cursor: pointer;">queue</button></div>
+        </form>
+      </div>
+    </div>
+  </template>
+
   <template x-if="analytics">
     <div>
       <div class="modal-backdrop" @click="analytics = null"></div>
@@ -226,6 +266,7 @@ function kanban() {
     stats: null,
     history: {},
     analytics: null,
+    addForm: null,
     filterText: '',
     toast: '',
     toastErr: false,
@@ -272,6 +313,45 @@ function kanban() {
       if (!iso) return '';
       const d = new Date(iso);
       return d.toISOString().slice(5, 16).replace('T', ' ');
+    },
+    openAddModal() {
+      this.addForm = {
+        kind: 'feature',
+        id: '',
+        name: '',
+        priority: 'medium',
+        reposCsv: 'hearth',
+        description: '',
+        acceptance: '',
+        repro: '',
+      };
+    },
+    async submitAdd() {
+      const f = this.addForm;
+      const body = {
+        id: f.id.trim(),
+        name: f.name.trim(),
+        description: f.description.trim(),
+        priority: f.priority,
+        kind: f.kind,
+        repos: f.reposCsv.split(',').map(r => r.trim()).filter(Boolean),
+        acceptance_criteria: f.acceptance.trim(),
+      };
+      if (f.kind === 'bug') body.repro_command = f.repro.trim();
+      try {
+        const r = await fetch('/features', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const resp = await r.json();
+        if (!r.ok) throw new Error(resp.detail || 'HTTP ' + r.status);
+        this.flash('queued ' + resp.id);
+        this.addForm = null;
+        await this.refresh();
+      } catch (e) {
+        this.flash('queue failed: ' + e.message, true);
+      }
     },
     async loadAnalytics() {
       try {

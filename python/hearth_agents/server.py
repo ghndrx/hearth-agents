@@ -65,6 +65,93 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             reverse=True,
         )
 
+    @app.post("/features")
+    async def create_feature(payload: dict[str, Any]) -> dict[str, Any]:
+        """Enqueue a new feature or bug. Body fields:
+          - id (required): kebab-case identifier
+          - name (required): human title
+          - description (required): what to build or what's broken
+          - kind: "feature" | "bug", default "feature"
+          - priority: critical | high | medium | low, default medium
+          - repos: list of repo names, default ["hearth"]
+          - research_topics: list of strings, default []
+          - discord_parity: string, default ""
+          - repro_command: string (bugs only)
+          - acceptance_criteria: string
+
+        Lets external integrations (GitHub issue webhook, browser form,
+        Telegram bot, CLI) push work into the backlog through one path.
+        Applies the same sanitizer to description so a malicious issue
+        body can't inject instructions via the agent prompt.
+        """
+        from .backlog import Feature
+        from .sanitize import sanitize as _sanitize
+        fid = (payload.get("id") or "").strip()
+        name = (payload.get("name") or "").strip()
+        desc_raw = (payload.get("description") or "").strip()
+        if not fid or not name or not desc_raw:
+            raise HTTPException(status_code=400, detail="id, name, description are required")
+        desc_sres = _sanitize(desc_raw, provenance=f"http_enqueue:{fid}", max_len=4000)
+        if desc_sres.rejected:
+            raise HTTPException(status_code=400, detail=f"description rejected: {desc_sres.reject_reason}")
+        kind = payload.get("kind") or "feature"
+        if kind not in ("feature", "bug"):
+            raise HTTPException(status_code=400, detail="kind must be 'feature' or 'bug'")
+        if kind == "bug" and not (payload.get("repro_command") or "").strip():
+            raise HTTPException(status_code=400, detail="bug requires repro_command")
+        priority = payload.get("priority") or "medium"
+        if priority not in ("critical", "high", "medium", "low"):
+            raise HTTPException(status_code=400, detail="priority must be critical|high|medium|low")
+        repos = payload.get("repos") or ["hearth"]
+        if not isinstance(repos, list) or not repos:
+            raise HTTPException(status_code=400, detail="repos must be a non-empty list")
+        feature = Feature(
+            id=fid,
+            name=name,
+            description=desc_sres.safe_text,
+            priority=priority,  # type: ignore[arg-type]
+            repos=[r for r in repos if isinstance(r, str)],  # type: ignore[arg-type]
+            research_topics=payload.get("research_topics") or [],
+            discord_parity=payload.get("discord_parity") or "",
+            kind=kind,  # type: ignore[arg-type]
+            repro_command=(payload.get("repro_command") or "")[:400],
+            acceptance_criteria=(payload.get("acceptance_criteria") or "")[:800],
+        )
+        if not backlog.add(feature):
+            raise HTTPException(status_code=409, detail="feature id or name already exists")
+        log.info("http_enqueue", id=fid, kind=kind, priority=priority, repos=repos)
+        return {"ok": True, "id": fid, "status": feature.status}
+
+    @app.get("/features/{feature_id}/attempts")
+    async def feature_attempts(feature_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent agent.ainvoke attempts for one feature from
+        /data/attempts.jsonl. Useful for debugging why a feature keeps
+        failing — shows the actual tool-call sequence per attempt +
+        token spend. Foundation for replay tooling."""
+        import json as _json
+        from pathlib import Path as _P
+        path = _P("/data/attempts.jsonl")
+        if not path.exists():
+            return []
+        capped = max(1, min(limit, 500))
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return []
+        matches: list[dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if entry.get("feature_id") == feature_id:
+                matches.append(entry)
+        return matches[-capped:]
+
     @app.post("/features/{feature_id}/action")
     async def feature_action(feature_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Apply a kanban action. Body: {"action": "approve|retry|nuke"}."""
