@@ -281,6 +281,7 @@ function kanban() {
   return {
     features: [],
     stats: null,
+    config: null,
     history: {},
     analytics: null,
     addForm: null,
@@ -311,10 +312,11 @@ function kanban() {
     },
     async refresh() {
       try {
-        const [fr, sr] = await Promise.all([fetch('/features'), fetch('/stats')]);
+        const [fr, sr, cr] = await Promise.all([fetch('/features'), fetch('/stats'), fetch('/config')]);
         if (!fr.ok) throw new Error('features HTTP ' + fr.status);
         this.features = await fr.json();
         if (sr.ok) this.stats = await sr.json();
+        if (cr.ok) this.config = await cr.json();
         this.lastRefresh = Date.now();
         this.sinceLabel = '0';
       } catch (e) {
@@ -455,11 +457,12 @@ function kanban() {
       this.act(f.id, 'nuke');
     },
     langfuseUrl(featureId) {
-      // Langfuse filters traces by metadata/tag. If the hostname isn't live yet,
-      // the link 404s harmlessly — intentional, deploy-then-deeplink.
-      const base = window.location.hostname.includes('walleye-frog')
-        ? 'https://langfuse.walleye-frog.ts.net'
-        : 'http://localhost:3000';
+      // Prefer the server-configured langfuse_public_url (from /config);
+      // falls back to localhost for local dev. Empty URL produces a JS
+      // link to "#" which is a no-op — the button stays present but
+      // harmless until the operator configures the URL.
+      const base = (this.stats && this.stats.langfuse_public) || (this.config && this.config.urls && this.config.urls.langfuse_public) || '';
+      if (!base) return '#';
       return base + '/project?search=' + encodeURIComponent('feature:' + featureId);
     },
     ghBranchUrl(f) {

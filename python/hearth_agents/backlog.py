@@ -77,6 +77,10 @@ class Feature:
     # medium = PR opens but is draft
     # low = normal auto-PR flow (default)
     risk_tier: RiskTier = "low"
+    # List of feature IDs that must be in status=done before this feature
+    # is schedulable. Lets multi-step projects queue coherently without a
+    # human sequencer. next_pending() respects this.
+    depends_on: list[str] = field(default_factory=list)
 
     def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived
@@ -104,6 +108,7 @@ class Feature:
             "planner_estimate_lines": self.planner_estimate_lines,
             "kind": self.kind,
             "risk_tier": self.risk_tier,
+            "depends_on": list(self.depends_on),
             "repro_command": self.repro_command[:200],
             "acceptance_criteria": self.acceptance_criteria[:400],
             "branch": branch,
@@ -242,9 +247,21 @@ class Backlog:
         """Self-improvement features always jump the queue ahead of product
         features at the same priority band — the agent cannot help the user
         effectively if it keeps making the same prompt mistakes. Within each
-        (self_improvement, priority) band, oldest first."""
+        (self_improvement, priority) band, oldest first.
+
+        Respects ``Feature.depends_on``: a feature is skipped if any
+        dependency is not yet ``done`` (or is absent from the backlog).
+        This prevents scheduling downstream work before its prerequisite
+        lands without requiring a manual sequencer.
+        """
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        candidates = [f for f in self.features if f.status == "pending"]
+        done_or_missing = {f.id for f in self.features if f.status == "done"}
+        def _blocked_by_dep(f: Feature) -> bool:
+            return bool(f.depends_on) and not all(d in done_or_missing for d in f.depends_on)
+        candidates = [
+            f for f in self.features
+            if f.status == "pending" and not _blocked_by_dep(f)
+        ]
         candidates.sort(
             key=lambda f: (
                 0 if f.self_improvement else 1,

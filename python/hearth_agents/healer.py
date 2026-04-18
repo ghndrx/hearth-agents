@@ -61,14 +61,32 @@ def _retry_push(feature) -> None:  # type: ignore[no-untyped-def]
             log.warning("healer_push_retry_error", feature=feature.id, err=str(e)[:200])
 
 
+_ADVERSARIAL_PREFIX = (
+    "PRIOR FAILURE. Treat this attempt as a fresh audit, not a continuation.\n"
+    "Before writing any code, run the 5-category self-audit on the CURRENT\n"
+    "worktree state (MISSING / WRONG / DANGEROUS / UNTYPED / TESTGAP) per\n"
+    "the developer prompt Phase 4.5. Empty categories must carry an explicit\n"
+    "why_covered string; empty audit is a failing audit.\n\n"
+)
+
+
 def _hint_for_reason(reason: str) -> str:
     """Translate a verify_changes reason into a targeted instruction the
     next-attempt prompt can paste in. Empty string when we have no specific
     advice (the agent then runs with the normal prompt).
+
+    Every non-empty hint is prefixed with the adversarial-audit reminder
+    (research #3812) — the healer fires on features that have already
+    failed at least once, and the adversarial framing is exactly what
+    the soft self-review couldn't catch.
     """
     r = reason.lower()
+
+    def _wrap(body: str) -> str:
+        return _ADVERSARIAL_PREFIX + body
+
     if "no commits" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: you opened a worktree last time and never committed "
             "anything. Do NOT enter another exploratory read-only spiral. After "
             "at most 6 reads, start writing with edit_file/write_file. End the "
@@ -77,7 +95,7 @@ def _hint_for_reason(reason: str) -> str:
             "no commit. Both are acceptable; abandoning silently is not."
         )
     if "diff too large" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: your diff exceeded the 600-line cap. This time, "
             "implement only the minimum viable slice that satisfies the feature "
             "name; defer secondary concerns to follow-up features. Target "
@@ -85,7 +103,7 @@ def _hint_for_reason(reason: str) -> str:
             "report 'BLOCKED: needs decomposition' rather than over-shipping."
         )
     if "planner_undercount" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: actual diff exceeded planner's estimate by >1.5x. "
             "The planner under-estimated the scope. This time, have the planner "
             "either (a) raise estimated_diff_lines to a realistic value, or "
@@ -93,45 +111,46 @@ def _hint_for_reason(reason: str) -> str:
             "Do not re-run the same plan hoping for a smaller diff."
         )
     if "no test file in diff" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: the diff contained zero test files. You shipped "
             "production code but no regression coverage. This time you MUST "
             "create or modify at least one test file per language convention "
             "(Go: *_test.go in the same package; TS/Svelte: *.test.ts co-"
-            "located; Python: tests/test_*.py). The test must actually "
-            "exercise the new behavior — a test that only asserts True "
-            "passes but catches nothing."
+            "located; Python: tests/test_*.py). Use scaffold_test_file if "
+            "the test file doesn't exist yet. The test must actually exercise "
+            "the new behavior — a test that only asserts True passes but "
+            "catches nothing."
         )
     if "tests failed" in r:
-        # Extract the actual compiler/test error text so the next attempt has
-        # concrete guidance, not generic advice. verify_changes returns
-        # "hearth: tests failed: <actual error>" — grab the tail so the agent
-        # sees things like "dm.go:251:102: too many arguments" directly.
         excerpt = reason.split("tests failed:", 1)[-1].strip()[:300] if "tests failed:" in reason else ""
         detail = f" Failing output excerpt:\n  {excerpt}\n\n" if excerpt else " "
-        return (
+        return _wrap(
             "PRIOR FAILURE: the test suite (or compile step) failed last attempt."
             + detail +
             "Fix exactly these errors before re-running. Do NOT re-plan the "
             "feature — the code is mostly right; just fix the specific errors "
-            "above. After fixing, run the test command and confirm exit=0 "
-            "BEFORE the final commit."
+            "above. Run verify_staged locally BEFORE the final commit."
         )
     if "never pushed" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: you committed locally but never pushed. End with a "
             "git push -u origin HEAD and verify with git ls-remote --heads origin."
         )
     if "exploratory_spiral" in r:
-        return (
+        return _wrap(
             "PRIOR FAILURE: you spent the entire last session reading files "
-            "without writing anything. STOP the exploratory spiral. Rules "
-            "this attempt: (1) max 4 reads before your first write, (2) never "
-            "re-read the same file twice — trust your memory or diff, (3) if "
-            "after 4 reads you still can't write, the feature is blocked and "
-            "you should report 'BLOCKED: <concrete reason>' and exit. A "
-            "silent-abandoned session is the worst outcome; a written "
-            "BLOCKED message with a specific reason is a successful failure."
+            "without writing anything. Rules this attempt: (1) max 4 reads "
+            "before your first write, (2) never re-read the same file twice, "
+            "(3) if after 4 reads you still can't write, report "
+            "'BLOCKED: <concrete reason>' and exit."
+        )
+    if "budget_exhausted" in r:
+        return _wrap(
+            "PRIOR FAILURE: the previous attempt burned through the per-feature "
+            "token budget without shipping. Cut scope aggressively. Pick ONE "
+            "acceptance condition and ignore everything else; follow-up features "
+            "can handle the rest. If the feature fundamentally can't be done "
+            "cheaply, report 'BLOCKED: needs-decomposition-or-budget-increase'."
         )
     return ""
 

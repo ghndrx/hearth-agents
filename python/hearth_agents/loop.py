@@ -1460,22 +1460,61 @@ def _auto_rerun_on_new_prompts(backlog: Backlog) -> int:
     return flipped
 
 
+async def _autoscaler(
+    backlog: Backlog,
+    worker_tasks: dict[int, asyncio.Task],
+    spawn: Any,
+) -> None:
+    """Grow/shrink the worker pool based on pending backlog depth.
+
+    Ceiling = settings.loop_workers_max or settings.loop_workers.
+    Floor   = settings.loop_workers_min (default 1).
+
+    Scale-up: pending >= high_water AND current < ceiling → spawn one.
+    Scale-down: pending < low_water AND current > floor → cancel one
+    (picks the newest to keep long-running workers stable).
+
+    Runs every 60s. Idempotent; stays at current size when neither
+    condition fires.
+    """
+    ceiling = max(1, settings.loop_workers_max or settings.loop_workers)
+    floor = max(1, min(settings.loop_workers_min, ceiling))
+    hi = settings.loop_autoscale_high_water
+    lo = settings.loop_autoscale_low_water
+    if floor == ceiling:
+        return  # autoscaling disabled
+    while True:
+        await asyncio.sleep(60)
+        pending = sum(1 for f in backlog.features if f.status == "pending")
+        current = len(worker_tasks)
+        if pending >= hi and current < ceiling:
+            wid = max(worker_tasks.keys(), default=-1) + 1
+            worker_tasks[wid] = asyncio.create_task(spawn(wid))
+            log.info("autoscale_up", worker=wid, current=current + 1, pending=pending)
+        elif pending < lo and current > floor:
+            # Drop the newest-spawned worker to preserve long-running context.
+            drop = max(worker_tasks.keys())
+            worker_tasks[drop].cancel()
+            worker_tasks.pop(drop, None)
+            log.info("autoscale_down", worker=drop, current=current - 1, pending=pending)
+        # Prune tasks that ended on their own (exception, etc).
+        for wid in list(worker_tasks):
+            if worker_tasks[wid].done():
+                worker_tasks.pop(wid)
+
+
 async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None = None) -> None:
     """Main loop. Runs until cancelled. Shares state with the HTTP server and bot.
 
-    Spawns ``settings.loop_workers`` workers against the shared backlog. Default
-    of 1 preserves existing serial behavior; raise to parallelize feature work.
+    Initial worker pool size is ``settings.loop_workers``. When
+    ``loop_workers_max > loop_workers_min`` the pool autoscales in
+    [min, max] based on pending depth.
     """
-    n = max(1, settings.loop_workers)
-    log.info("loop_started", interval_sec=LOOP_INTERVAL_SEC, workers=n, stats=backlog.stats())
+    initial = max(1, settings.loop_workers)
+    log.info("loop_started", interval_sec=LOOP_INTERVAL_SEC, workers=initial, stats=backlog.stats())
     notifier = Notifier()
-    await notifier.send(f"🔥 hearth-agents loop started — workers={n} {backlog.stats()}")
+    await notifier.send(f"🔥 hearth-agents loop started — workers={initial} {backlog.stats()}")
 
-    # Auto-rerun blocked features that were blocked under an OLD
-    # prompts_version. Cheap to do at boot — just one transition-log
-    # walk + a few set_status calls. No effect when prompts haven't
-    # changed since last boot. Closes the gap where shipping a new
-    # prompt didn't auto-revisit prior failures.
     try:
         flipped = _auto_rerun_on_new_prompts(backlog)
         if flipped:
@@ -1483,10 +1522,21 @@ async def run_forever(backlog: Backlog, agent: Any, fallback_agent: Any | None =
     except Exception as e:  # noqa: BLE001
         log.warning("auto_rerun_failed", err=str(e)[:200])
 
+    def _spawn(wid: int) -> Any:
+        return _worker(wid, backlog, agent, notifier, fallback_agent)
+
+    worker_tasks: dict[int, asyncio.Task] = {
+        i: asyncio.create_task(_spawn(i)) for i in range(initial)
+    }
     try:
         await asyncio.gather(
             _watchdog(),
-            *[_worker(i, backlog, agent, notifier, fallback_agent) for i in range(n)],
+            _autoscaler(backlog, worker_tasks, _spawn),
+            *worker_tasks.values(),
+            return_exceptions=True,
         )
     finally:
+        for t in worker_tasks.values():
+            if not t.done():
+                t.cancel()
         await notifier.close()

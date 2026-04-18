@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "http://langfuse-web:3000"
+    # Operator-facing URL (exposed via /config for the kanban's trace
+    # deeplink). Empty → kanban hides the trace button. When set, kanban
+    # links to ``<langfuse_public_url>/project?search=feature:<id>``.
+    langfuse_public_url: str = ""
+    # Worker autoscaling bounds. Workers grow toward max when pending
+    # depth rises above high_water, shrink toward min when depth falls
+    # under low_water. Set min == max to disable scaling; default stays
+    # at settings.loop_workers for backwards compat.
+    loop_workers_min: int = 1
+    loop_workers_max: int = 0  # 0 means "use loop_workers as the ceiling"
+    loop_autoscale_high_water: int = 20
+    loop_autoscale_low_water: int = 4
 
     # Serper (web search fallback)
     serper_api_key: str = ""

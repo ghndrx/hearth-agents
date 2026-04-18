@@ -108,6 +108,9 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         repos = payload.get("repos") or ["hearth"]
         if not isinstance(repos, list) or not repos:
             raise HTTPException(status_code=400, detail="repos must be a non-empty list")
+        depends_on = payload.get("depends_on") or []
+        if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
+            raise HTTPException(status_code=400, detail="depends_on must be a list of feature IDs")
         feature = Feature(
             id=fid,
             name=name,
@@ -119,6 +122,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             kind=kind,  # type: ignore[arg-type]
             repro_command=(payload.get("repro_command") or "")[:400],
             acceptance_criteria=(payload.get("acceptance_criteria") or "")[:800],
+            depends_on=list(depends_on),
         )
         if not backlog.add(feature):
             raise HTTPException(status_code=409, detail="feature id or name already exists")
@@ -181,6 +185,10 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "prompts_version": prompts_version(),
             "loop": {
                 "workers": settings.loop_workers,
+                "workers_min": settings.loop_workers_min,
+                "workers_max": settings.loop_workers_max or settings.loop_workers,
+                "autoscale_high_water": settings.loop_autoscale_high_water,
+                "autoscale_low_water": settings.loop_autoscale_low_water,
                 "max_fixups": settings.max_fixups,
                 "per_feature_timeout_sec": settings.per_feature_timeout_sec,
                 "minimax_bias": settings.minimax_bias,
@@ -192,6 +200,9 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "flags": {
                 "product_features_enabled": settings.product_features_enabled,
                 "langfuse_enabled": bool(settings.langfuse_public_key and settings.langfuse_secret_key),
+            },
+            "urls": {
+                "langfuse_public": settings.langfuse_public_url,
             },
         }
 
