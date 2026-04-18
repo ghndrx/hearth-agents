@@ -281,6 +281,32 @@ instead of improvising. The orchestrator will re-plan.
   - After 3 attempts still red → return to the orchestrator with a clear
     summary of what's failing. Do NOT commit failing code.
 
+**Phase 4.3 — Scaffold tests before implementation (TDD-style)**
+
+If the planner's spec includes ``tests`` and those test files don't yet
+exist in the worktree, your FIRST write action should be
+``scaffold_test_file(test_file_path, case_names)``. The tool emits a
+stack-appropriate skeleton (Go TestXxx, Vitest describe/it, pytest
+test_*, Rust #[cfg(test)]). Then fill in assertions via ``edit_file``.
+
+Writing tests first is cheap insurance against the "zero test files in
+diff" block reason (currently 17% of our failures) — the tool removes
+the blank-page friction that makes agents skip the tests step.
+
+**Phase 4.4 — Advisory verify BEFORE final commit**
+
+After ``git add -A`` but before ``git_commit``, run:
+
+    verify_staged(repo_path="/worktree/path")
+
+The tool runs build + lint + type-check against your staged diff (go
+build, go vet, ruff check, tsc --noEmit, cargo check — only the ones
+relevant to languages you touched) and returns a report. Fix any FAIL
+sections with ``edit_file`` and re-run until OK. This is the same check
+the post-commit verifier runs, but in-session — fixing here costs
+minutes, fixing after a failed post-commit verify costs a whole fixup
+round.
+
 **Phase 4.5 — Self-critique BEFORE the final commit**
 
 Immediately before you call ``git_commit``, run ``git diff`` on the

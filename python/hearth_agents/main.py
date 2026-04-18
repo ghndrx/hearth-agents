@@ -15,6 +15,7 @@ from .agent import build_agent, build_fallback_agent
 from .backlog import Backlog
 from .bot import run_bot
 from .config import settings
+from .digest import run_digest
 from .gc_worktrees import run_worktree_gc
 from .healer import run_healer
 from .idea_engine import run_idea_engine
@@ -49,6 +50,7 @@ async def _main() -> None:
         run_idea_engine(backlog),
         run_healer(backlog),
         run_worktree_gc(backlog),
+        run_digest(backlog),
     )
 
 

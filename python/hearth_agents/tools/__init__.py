@@ -10,8 +10,10 @@ from .git_ops import (
 )
 from .planner_tools import record_planner_estimate
 from .repo_search import repo_reindex, repo_search
+from .scaffold import scaffold_test_file
 from .serper import web_search
 from .shell import run_command
+from .verify_staged import verify_staged
 from .wikidelve import (
     wikidelve_pending_jobs,
     wikidelve_read,
@@ -37,4 +39,6 @@ __all__ = [
     "git_worktree_add",
     "git_worktree_remove",
     "record_planner_estimate",
+    "scaffold_test_file",
+    "verify_staged",
 ]

@@ -77,6 +77,7 @@ KANBAN_HTML = r"""<!doctype html>
   <header>
     <h1>hearth-agents <span style="color: var(--muted); font-weight: 400;">kanban</span></h1>
     <div class="bulk">
+      <input type="search" placeholder="filter id / name / repo..." x-model="filterText" style="background:#0d1117;color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:12px;width:220px;" />
       <span class="meta" x-text="'refreshed ' + sinceLabel + 's ago'"></span>
       <button @click="refresh()">refresh</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()" title="Mark all currently blocked as human-approved">approve all blocked</button>
@@ -158,6 +159,7 @@ function kanban() {
     features: [],
     stats: null,
     history: {},
+    filterText: '',
     toast: '',
     toastErr: false,
     lastRefresh: Date.now(),
@@ -223,11 +225,19 @@ function kanban() {
     },
     // Splits blocked features: escalated = heal_attempts >= 3 (healer gave
     // up), blocked = everything else that's still in the heal rotation.
+    // Search filter is applied on every column — case-insensitive match
+    // against id, name, and repo list.
     featuresByColumn(col) {
-      const base = this.features.filter(f => col.match.includes(f.status));
-      if (col.key === 'blocked') return base.filter(f => (f.heal_attempts || 0) < 3);
-      if (col.key === 'escalated') return base.filter(f => (f.heal_attempts || 0) >= 3);
-      return base;
+      let base = this.features.filter(f => col.match.includes(f.status));
+      if (col.key === 'blocked') base = base.filter(f => (f.heal_attempts || 0) < 3);
+      if (col.key === 'escalated') base = base.filter(f => (f.heal_attempts || 0) >= 3);
+      const q = this.filterText.trim().toLowerCase();
+      if (!q) return base;
+      return base.filter(f =>
+        (f.id || '').toLowerCase().includes(q)
+        || (f.name || '').toLowerCase().includes(q)
+        || (f.repos || []).some(r => r.toLowerCase().includes(q))
+      );
     },
     async act(id, action) {
       try {
