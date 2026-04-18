@@ -306,6 +306,35 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_plan(args: list[str]) -> None:
+    """hearth plan "<goal>" [count=5] [repo=hearth]
+    Returns a list of Feature drafts; prompts before queuing any."""
+    if not args:
+        print("usage: hearth plan '<goal>' [count=5] [repo=hearth]", file=sys.stderr); sys.exit(2)
+    goal = args[0]
+    count = 5
+    repo = "hearth"
+    for a in args[1:]:
+        if a.startswith("count="): count = int(a.split("=", 1)[1])
+        elif a.startswith("repo="): repo = a.split("=", 1)[1]
+    print(f"planning {count} features for '{goal[:60]}'... (~20s)")
+    r = _req("POST", "/plan", body={"goal": goal, "default_repo": repo, "count": count})
+    if not r.get("ok"):
+        print(f"planner error: {r.get('error','?')}")
+        if r.get("raw"): print(r["raw"][:400])
+        return
+    features = r.get("features", [])
+    print(f"\n=== proposed {len(features)} features ===")
+    for i, f in enumerate(features, 1):
+        print(f"{i}. [{f.get('priority','?')}] {f.get('id','?')}: {f.get('name','?')[:60]}")
+        print(f"   {f.get('description','')[:140]}")
+    confirm = input(f"\nQueue all {len(features)}? [y/N] ").strip().lower()
+    if confirm != "y":
+        print("not queued"); return
+    out = _req("POST", "/features/bulk", body={"features": features})
+    print(f"ok={out.get('ok', 0)}/{out.get('submitted', 0)}")
+
+
 def cmd_labels(args: list[str]) -> None:
     """List every label + per-label counts."""
     d = _req("GET", "/labels")
@@ -537,7 +566,7 @@ COMMANDS = {
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
     "top": cmd_top, "debug": cmd_debug, "doctor": cmd_doctor,
-    "labels": cmd_labels, "template": cmd_template,
+    "labels": cmd_labels, "template": cmd_template, "plan": cmd_plan,
 }
 
 

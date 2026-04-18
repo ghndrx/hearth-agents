@@ -100,6 +100,7 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="loadDepGraph()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">deps</button>
       <button @click="loadSnapshots()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">diff</button>
       <button @click="openViews = !openViews" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">views</button>
+      <button @click="focusMode = !focusMode" :class="focusMode ? 'bg-accent/20 text-accent' : ''" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface" title="Hide done + escalated columns">focus</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()"
               class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed">
         approve blocked
@@ -136,8 +137,8 @@ KANBAN_HTML = r"""<!doctype html>
 </header>
 
 <!-- Board -->
-<main class="grid grid-cols-5 gap-3 p-4" style="height: calc(100vh - 110px);">
-  <template x-for="col in columns" :key="col.key">
+<main :class="focusMode ? 'grid grid-cols-3 gap-3 p-4' : 'grid grid-cols-5 gap-3 p-4'" style="height: calc(100vh - 110px);">
+  <template x-for="col in visibleColumns" :key="col.key">
     <div class="flex flex-col min-h-0 bg-surface rounded-lg border border-border overflow-hidden">
       <div class="flex items-center gap-2 px-3 py-2 border-b border-border">
         <span class="w-2 h-2 rounded-full" :style="'background:' + col.color"></span>
@@ -539,6 +540,7 @@ function kanban() {
     riskFilter: '',
     openViews: false,
     savedViews: [],
+    focusMode: false,
     selectedId: null,
     toast: '',
     toastErr: false,
@@ -553,6 +555,10 @@ function kanban() {
     ],
     get blockedFeatures() { return this.features.filter(f => f.status === 'blocked'); },
     get escalatedFeatures() { return this.features.filter(f => f.status === 'blocked' && (f.heal_attempts || 0) >= 3); },
+    get visibleColumns() {
+      if (!this.focusMode) return this.columns;
+      return this.columns.filter(c => ['pending', 'implementing', 'blocked'].includes(c.key));
+    },
     get workerBadges() {
       const w = (this.stats && this.stats.workers) || {};
       return Object.keys(w).sort((a, b) => Number(a) - Number(b)).map(id => ({

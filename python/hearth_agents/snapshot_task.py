@@ -21,7 +21,11 @@ from .backlog import Backlog
 from .logger import log
 
 SNAPSHOT_INTERVAL_SEC = 24 * 60 * 60
-RETENTION_DAYS = 30
+# Retention window for daily snapshots. Overridable via
+# SNAPSHOT_RETENTION_DAYS env so operators managing longer-retention
+# audit requirements can extend without code change.
+import os as _os
+RETENTION_DAYS = int(_os.environ.get("SNAPSHOT_RETENTION_DAYS", "30"))
 
 
 async def run_snapshot(backlog: Backlog) -> None:

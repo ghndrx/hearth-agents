@@ -1346,6 +1346,56 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "top_block_reasons": [{"reason": r, "count": c} for r, c in reasons.most_common(5)],
         }
 
+    @app.post("/plan")
+    async def plan_from_text(payload: dict[str, Any]) -> dict[str, Any]:
+        """Natural-language → Feature-list planner.
+
+        Body: {"goal": str, "default_repo": str, "count": int}.
+        Runs one cheap MiniMax pass with a planning prompt that
+        decomposes the goal into 3-10 concrete Feature drafts ready
+        for /features/bulk. Returns the list; caller decides whether
+        to POST it. Nothing is queued automatically."""
+        from .models import build_minimax
+        goal = (payload.get("goal") or "").strip()
+        default_repo = (payload.get("default_repo") or "hearth").strip()
+        count = int(payload.get("count") or 5)
+        if not goal:
+            raise HTTPException(status_code=400, detail="goal required")
+        count = max(1, min(count, 15))
+        system_prompt = (
+            "You are a planner. Decompose the goal into concrete, shippable "
+            "features that could each land as a single PR. Return JSON only: "
+            "{\"features\": [{\"id\": kebab-id, \"name\": str, \"description\": str, "
+            "\"priority\": critical|high|medium|low, \"repos\": [str], "
+            "\"kind\": feature|bug|refactor|schema|security, "
+            "\"labels\": [str], \"acceptance_criteria\": str}]}. "
+            f"Produce exactly {count} features. Each should be small enough "
+            "to ship in <400 diff lines. Use default_repo when unsure."
+        )
+        try:
+            model = build_minimax()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"planner unavailable: {e}")
+        try:
+            resp = await model.ainvoke([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Goal: {goal}\nDefault repo: {default_repo}\nReturn JSON, no markdown fence."},
+            ])
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"planner invoke failed: {e}")
+        text = getattr(resp, "content", "") or ""
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("\n", 1)[0]
+        import json as _json
+        try:
+            parsed = _json.loads(cleaned)
+        except _json.JSONDecodeError:
+            return {"ok": False, "raw": text[:4000], "error": "planner output didn't parse as JSON"}
+        return {"ok": True, "features": parsed.get("features", []), "goal": goal}
+
     @app.post("/features/from-template")
     async def features_from_template(payload: dict[str, Any]) -> dict[str, Any]:
         """Spawn a Feature from a named template. Body:

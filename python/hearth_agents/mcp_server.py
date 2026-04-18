@@ -127,6 +127,35 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], Any]]] = {
          "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]}},
         lambda a: _http("GET", f"/dashboard/{urllib.parse.quote(a['repo'])}"),
     ),
+    "synthesize_research": (
+        {
+            "description": "Read a wikidelve research article and return structured recommendations as JSON.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kb": {"type": "string", "default": "personal"},
+                    "slug": {"type": "string"},
+                },
+                "required": ["slug"],
+            },
+        },
+        lambda a: _http("POST", "/research/synthesize", body={"kb": a.get("kb", "personal"), "slug": a["slug"]}),
+    ),
+    "plan": (
+        {
+            "description": "Decompose a natural-language goal into a list of shippable Feature drafts via MiniMax.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "default_repo": {"type": "string", "default": "hearth"},
+                    "count": {"type": "integer", "default": 5},
+                },
+                "required": ["goal"],
+            },
+        },
+        lambda a: _http("POST", "/plan", body=a),
+    ),
 }
 
 
