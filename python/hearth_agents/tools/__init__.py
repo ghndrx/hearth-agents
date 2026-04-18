@@ -32,6 +32,7 @@ from .wikidelve import (
     wikidelve_research,
     wikidelve_search,
 )
+from .wikidelve_synthesize import wikidelve_synthesize
 
 __all__ = [
     "wikidelve_search",
@@ -62,4 +63,5 @@ __all__ = [
     "scaffold_otel",
     "a11y_audit",
     "validate_acceptance_criteria",
+    "wikidelve_synthesize",
 ]

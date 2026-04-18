@@ -354,6 +354,15 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from dataclasses import asdict
         return [asdict(f) for f in backlog.features]
 
+    @app.get("/backlog/snapshots")
+    async def backlog_snapshots_list() -> list[str]:
+        """List available snapshot dates for the kanban diff UI."""
+        from pathlib import Path as _P
+        snap_dir = _P("/data/backlog-snapshots")
+        if not snap_dir.exists():
+            return []
+        return sorted(p.stem for p in snap_dir.glob("*.json"))
+
     @app.get("/backlog/diff")
     async def backlog_diff(from_date: str, to_date: str) -> dict[str, Any]:
         """Diff two daily snapshots from /data/backlog-snapshots/.

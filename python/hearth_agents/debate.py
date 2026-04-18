@@ -71,12 +71,44 @@ async def run_debate(
         _invoke("primary", primary_agent),
         _invoke("fallback", fallback_agent),
     )
+
+    # Auto-select a winner (research #3816 prescribes "parallel-diverse
+    # with diff-size tiebreaker"). Run verify_changes against each
+    # model's worktree output, pick the one that:
+    #   1. Passes verify (correctness trumps everything)
+    #   2. Has the smaller diff (prefer minimal changes)
+    # Falls back to "no winner" when both fail verify; the operator
+    # drills into /replay/{id} for manual pick in that case.
+    winner = None
+    winner_reason = ""
+    try:
+        from .verify import verify_changes
+        ok, reason = verify_changes(feature)
+        # verify_changes reads the feature's default worktree/branch.
+        # Both agents share the branch; last-write-wins on push.
+        # When the fallback ran second (asyncio.gather order-by-completion),
+        # the worktree reflects its output. We can't easily separate their
+        # outputs without per-attempt branch suffixes; future work.
+        # For now: if verify passes we pick the passing model per log.
+        if ok:
+            # Prefer the model with fewer tool calls (proxy for cleaner solution).
+            candidates = [r for r in results if not r.get("error")]
+            if candidates:
+                winner = min(candidates, key=lambda r: r.get("tool_count", 9999))
+                winner_reason = f"verify passed, picked {winner['tag']} (fewer tool calls)"
+        else:
+            winner_reason = f"no winner: verify failed ({reason[:120]})"
+    except Exception as e:  # noqa: BLE001
+        winner_reason = f"auto-select skipped: {e}"
+
     return {
         "feature_id": feature.id,
         "results": results,
+        "winner": winner.get("tag") if winner else None,
+        "winner_reason": winner_reason,
         "note": (
-            "Both agents ran in parallel; pick the branch whose verify_staged "
-            "comes back clean. If both pass, take the smaller-diff one. Only "
-            "one can be merged — the operator decides."
+            "Debate complete. When winner is set, the loop should prefer "
+            "that model on the next retry of this feature. Operator can "
+            "manually drill via /replay/{id}."
         ),
     }

@@ -98,6 +98,7 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="loadAnalytics()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">analytics</button>
       <button @click="loadSchedule()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">schedule</button>
       <button @click="loadDepGraph()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">deps</button>
+      <button @click="loadSnapshots()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">diff</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()"
               class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed">
         approve blocked
@@ -339,6 +340,66 @@ KANBAN_HTML = r"""<!doctype html>
   </div>
 </template>
 
+<!-- Snapshot-diff modal -->
+<template x-if="snapshotPicker !== null">
+  <div @keydown.escape.window="snapshotPicker = null">
+    <div class="fixed inset-0 bg-black/70 backdrop-blur-sm z-10" @click="snapshotPicker = null"></div>
+    <div class="fixed inset-8 glass border border-border rounded-xl z-20 p-6 overflow-auto scrollbar-thin shadow-modal">
+      <button class="absolute top-3 right-4 text-xs px-3 py-1.5 rounded border border-border hover:bg-surface" @click="snapshotPicker = null">close</button>
+      <h2 class="text-sm font-semibold mb-3">Backlog diff</h2>
+      <div class="flex items-center gap-3 mb-4 text-xs">
+        <label class="text-muted">from</label>
+        <select x-model="diffFrom" class="bg-bg border border-border rounded px-2 py-1 focus:outline-none focus:border-accent">
+          <option value="">select...</option>
+          <template x-for="s in snapshotPicker" :key="s"><option x-text="s"></option></template>
+        </select>
+        <label class="text-muted">to</label>
+        <select x-model="diffTo" class="bg-bg border border-border rounded px-2 py-1 focus:outline-none focus:border-accent">
+          <option value="">select...</option>
+          <template x-for="s in snapshotPicker" :key="s"><option x-text="s"></option></template>
+        </select>
+        <button @click="runDiff()" class="px-3 py-1 rounded bg-done text-bg font-medium hover:bg-done/90">diff</button>
+      </div>
+      <template x-if="diffResult">
+        <div class="text-xs">
+          <div class="mb-4 text-muted">
+            <span class="text-done font-semibold" x-text="diffResult.added_count"></span> added ·
+            <span class="text-blocked font-semibold" x-text="diffResult.removed_count"></span> removed ·
+            <span class="text-high font-semibold" x-text="diffResult.status_changed_count"></span> status-changed
+          </div>
+          <template x-if="diffResult.added && diffResult.added.length">
+            <div class="mb-3">
+              <h3 class="text-done font-semibold mb-1">Added (<span x-text="diffResult.added.length"></span>)</h3>
+              <template x-for="f in diffResult.added" :key="f.id">
+                <div class="py-0.5 font-mono"><span x-text="f.id"></span> <span class="text-muted" x-text="'· ' + (f.name || '')"></span></div>
+              </template>
+            </div>
+          </template>
+          <template x-if="diffResult.removed && diffResult.removed.length">
+            <div class="mb-3">
+              <h3 class="text-blocked font-semibold mb-1">Removed (<span x-text="diffResult.removed.length"></span>)</h3>
+              <template x-for="f in diffResult.removed" :key="f.id">
+                <div class="py-0.5 font-mono"><span x-text="f.id"></span> <span class="text-muted" x-text="'· ' + (f.name || '')"></span></div>
+              </template>
+            </div>
+          </template>
+          <template x-if="diffResult.status_changed && diffResult.status_changed.length">
+            <div>
+              <h3 class="text-high font-semibold mb-1">Status changed (<span x-text="diffResult.status_changed.length"></span>)</h3>
+              <template x-for="f in diffResult.status_changed" :key="f.id">
+                <div class="py-0.5 font-mono">
+                  <span x-text="f.id"></span>
+                  <span class="text-muted" x-text="': ' + f.from + ' → ' + f.to"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+    </div>
+  </div>
+</template>
+
 <!-- Schedule modal -->
 <template x-if="schedule !== null">
   <div @keydown.escape.window="schedule = null">
@@ -414,6 +475,10 @@ function kanban() {
     scheduleJson: '',
     scheduleStatus: '',
     depGraph: null,
+    snapshotPicker: null,
+    diffFrom: '',
+    diffTo: '',
+    diffResult: null,
     filterText: '',
     kindFilter: '',
     riskFilter: '',
@@ -598,6 +663,30 @@ function kanban() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         this.depGraph = await r.json();
       } catch (e) { this.flash('dep-graph fetch failed: ' + e.message, true); }
+    },
+    async loadSnapshots() {
+      try {
+        const r = await fetch('/backlog/snapshots');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.snapshotPicker = await r.json();
+        if (!this.snapshotPicker.length) {
+          this.flash('no snapshots yet — first one lands tomorrow', false);
+          this.snapshotPicker = null;
+        } else {
+          // default: diff from day-before-latest to latest
+          this.diffTo = this.snapshotPicker[this.snapshotPicker.length - 1];
+          this.diffFrom = this.snapshotPicker[Math.max(0, this.snapshotPicker.length - 2)];
+          this.diffResult = null;
+        }
+      } catch (e) { this.flash('snapshots failed: ' + e.message, true); }
+    },
+    async runDiff() {
+      if (!this.diffFrom || !this.diffTo) return;
+      try {
+        const r = await fetch('/backlog/diff?from_date=' + encodeURIComponent(this.diffFrom) + '&to_date=' + encodeURIComponent(this.diffTo));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        this.diffResult = await r.json();
+      } catch (e) { this.flash('diff failed: ' + e.message, true); }
     },
     async toggleHistory(id) {
       if (this.history[id]) { delete this.history[id]; return; }

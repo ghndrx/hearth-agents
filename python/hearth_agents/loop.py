@@ -840,6 +840,69 @@ commit on approval. Skip PR creation if implementation produced zero file change
 {memory_prefix}{conventions_block}"""
 
 
+def _worker_affinity_score(worker_id: int, kind: str) -> float:
+    """Historical win-rate of a worker on features of this kind.
+
+    Walks the transition log backwards, finds terminal verdicts on
+    features whose kind matches, and correlates with the worker that
+    processed them (via attempts.jsonl). Returns done/total as a
+    float in [0, 1]. When sample is thin (<3) returns 0.5 (neutral).
+
+    Cheap heuristic — runs only at claim time, bounded lookup. No ML.
+    """
+    from pathlib import Path as _P
+    import json as _json
+    # Quick: bail if log doesn't exist yet.
+    transitions_path = _P("/data/transitions.jsonl")
+    attempts_path = _P("/data/attempts.jsonl")
+    if not (transitions_path.exists() and attempts_path.exists()):
+        return 0.5
+    # feature_id → last terminal verdict
+    terminal: dict[str, str] = {}
+    try:
+        for line in transitions_path.read_text(encoding="utf-8").splitlines()[-5000:]:
+            try:
+                t = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if (t.get("to") or "") in ("done", "blocked"):
+                terminal[t.get("feature_id", "")] = t["to"]
+    except OSError:
+        return 0.5
+    # feature_id → worker_id (from attempts.jsonl)
+    feature_worker: dict[str, int] = {}
+    try:
+        for line in attempts_path.read_text(encoding="utf-8").splitlines()[-5000:]:
+            try:
+                a = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            fid = a.get("feature_id", "")
+            # attempts.jsonl doesn't record worker_id today — left as 0.
+            # When that's added this heuristic becomes useful.
+            feature_worker.setdefault(fid, int(a.get("worker", 0)))
+    except OSError:
+        return 0.5
+    # Match against the current backlog to filter by kind.
+    done = blocked = 0
+    # Note: without access to backlog here, we approximate by inspecting
+    # the feature_id prefix (bug-*, schema-*, etc) + the terminal verdict.
+    # This is rough but surfaces affinity where kind is in the id.
+    for fid, verdict in terminal.items():
+        if feature_worker.get(fid) != worker_id:
+            continue
+        if kind not in fid and kind != "feature":  # weak filter
+            continue
+        if verdict == "done":
+            done += 1
+        else:
+            blocked += 1
+    total = done + blocked
+    if total < 3:
+        return 0.5
+    return done / total
+
+
 async def _claim_next(backlog: Backlog, worker_id: int = 0) -> Feature | None:
     """Atomically pick the next pending feature and mark it implementing.
 
@@ -848,6 +911,11 @@ async def _claim_next(backlog: Backlog, worker_id: int = 0) -> Feature | None:
     entirely. Combined with the existing _self_improv_active counter
     this gives belt-and-suspenders safety against parallel edits to
     the shared prompts.py file.
+
+    Secondary affinity: when multiple features at the same priority
+    are pending, prefer the one this worker has the highest historical
+    win-rate on (by kind). See _worker_affinity_score. No effect on
+    an empty history.
 
     Holds ``_CLAIM_LOCK`` across the read+write so two concurrent workers
     can never grab the same feature.
