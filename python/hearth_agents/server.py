@@ -441,6 +441,18 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         log.info("schedule_updated", count=len(cleaned))
         return {"ok": True, "count": len(cleaned)}
 
+    @app.post("/features/{feature_id}/debate")
+    async def feature_debate(feature_id: str) -> dict[str, Any]:
+        """Run both Kimi and MiniMax in parallel on the same prompt,
+        return both outputs for operator comparison (research #3816).
+        Doubles token spend on this feature; use for stuck features
+        where sequential cross-model retry hasn't closed the gap."""
+        feature = next((f for f in backlog.features if f.id == feature_id), None)
+        if feature is None:
+            raise HTTPException(status_code=404, detail="feature not found")
+        from .debate import run_debate
+        return await run_debate(feature, backlog, agent, getattr(app.state, "fallback_agent", None))
+
     @app.post("/features/{feature_id}/replay-retry")
     async def replay_retry(feature_id: str) -> dict[str, Any]:
         """Aggressive retry: clears heal_hint AND heal_attempts AND flips
@@ -582,11 +594,15 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         }
 
     @app.post("/webhooks/alert")
-    async def alert_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+    async def alert_webhook(request: Request) -> dict[str, Any]:
         """Normalize alert payloads from PagerDuty / Grafana / Datadog
         into an incident Feature. Research #3833 (SRE role replacement):
         a single normalized alert schema gated by risk tier is the
         minimum viable ingest path.
+
+        HMAC verified when ``settings.alert_webhook_secret`` is set;
+        otherwise accepted unauthenticated (safe when bound to Tailscale
+        only).
 
         Risk tier rule of thumb:
           - high: production customer-facing impact; agent builds a
@@ -598,6 +614,18 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         read are best-effort — missing fields fall back to defaults):
           - service, summary, severity, fired_at, dedupe_key
         """
+        raw = await request.body()
+        if settings.alert_webhook_secret:
+            sig = request.headers.get("x-alert-signature-256", "")
+            expected = "sha256=" + hmac.new(
+                settings.alert_webhook_secret.encode(), raw, hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(sig, expected):
+                raise HTTPException(status_code=401, detail="invalid signature")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="body must be JSON")
         from .backlog import Feature
         from .sanitize import sanitize as _sanitize
         service = (payload.get("service") or payload.get("source") or "unknown")[:40]

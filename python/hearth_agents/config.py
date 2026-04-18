@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = ""
     github_webhook_secret: str = ""
+    # Alert webhook HMAC secret. Callers (PagerDuty, Grafana, Datadog)
+    # must send sha256=HMAC(body, secret) in header ``x-alert-signature-256``.
+    # Empty secret = accept-all (the default) — fine when the endpoint
+    # is only reachable over Tailscale but a real operator should set
+    # this once the endpoint is public.
+    alert_webhook_secret: str = ""
 
     # Persistence
     backlog_path: str = "/data/backlog.json"

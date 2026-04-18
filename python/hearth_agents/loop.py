@@ -395,6 +395,7 @@ def _append_attempt_log(
     result: Any,
     input_tokens: int,
     output_tokens: int,
+    duration_sec: float = 0.0,
 ) -> None:
     """Append one line per attempt to ``/data/attempts.jsonl``. Foundation
     for the debugging-session-replay tooling (research #3807) — captures
@@ -425,6 +426,7 @@ def _append_attempt_log(
         "provider": provider,
         "input_tokens": int(input_tokens),
         "output_tokens": int(output_tokens),
+        "duration_sec": round(float(duration_sec), 2),
         "tool_calls": tool_trace[:200],  # cap so a stuck loop can't bloat
     }
     path = _P("/data/attempts.jsonl")
@@ -1018,6 +1020,8 @@ async def run_once(
             # THIS attempt needed auto-commit or the agent committed
             # on its own (research #3810's audit signal).
             attempt_rescued = False
+            import time as _time_attempt
+            _attempt_started = _time_attempt.time()
             result = await asyncio.wait_for(
                 active.ainvoke(
                     {"messages": [{"role": "user", "content": prompt}]},
@@ -1061,7 +1065,10 @@ async def run_once(
             # Persist this attempt's tool-call fingerprint log so future
             # debugging-session-replay tooling (research #3807) has the
             # raw trace to work against. Cheap append-only JSONL.
-            _append_attempt_log(feature.id, attempt, active_provider, result, in_tok, out_tok)
+            _append_attempt_log(
+                feature.id, attempt, active_provider, result, in_tok, out_tok,
+                duration_sec=_time_attempt.time() - _attempt_started,
+            )
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
             # Rescue stray diffs: if the agent wrote files in a worktree but

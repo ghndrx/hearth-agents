@@ -20,6 +20,7 @@ from .digest import run_digest
 from .drift_alarm import run_drift_alarm
 from .scheduler import run_scheduler
 from .self_improvement_seeder import run_self_improvement_seeder
+from .snapshot_task import run_snapshot
 from .stuck_feature_escalator import run_stuck_feature_escalator
 from .gc_worktrees import run_worktree_gc
 from .healer import run_healer
@@ -46,6 +47,9 @@ async def _main() -> None:
         fallback_agent = None
         log.warning("fallback_agent_unavailable", error=str(e))
     app = build_app(backlog, agent)
+    # Expose fallback_agent on app.state so endpoints (e.g. /debate) can
+    # reach the second model without reaching into module-level globals.
+    app.state.fallback_agent = fallback_agent
     log.info("starting", port=settings.server_port, stats=backlog.stats())
 
     await asyncio.gather(
@@ -61,6 +65,7 @@ async def _main() -> None:
         run_scheduler(backlog),
         run_stuck_feature_escalator(backlog),
         run_self_improvement_seeder(backlog),
+        run_snapshot(backlog),
     )
 
 

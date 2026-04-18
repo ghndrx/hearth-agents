@@ -23,7 +23,9 @@ def _cost(in_tokens: int, out_tokens: int) -> float:
 
 
 def analyze_costs() -> dict[str, Any]:
-    """Return per-feature totals + daily series + per-provider split."""
+    """Return per-feature totals + daily series + per-provider split,
+    plus duration percentiles (P50 / P95) derived from attempts.jsonl's
+    duration_sec field."""
     if not _ATTEMPTS_PATH.exists():
         return {
             "total_cost_usd": 0.0,
@@ -32,6 +34,7 @@ def analyze_costs() -> dict[str, Any]:
             "top_features": [],
             "daily": [],
             "providers": {},
+            "duration_percentiles": {"p50": 0.0, "p95": 0.0, "sample_count": 0},
         }
     per_feature_in: dict[str, int] = defaultdict(int)
     per_feature_out: dict[str, int] = defaultdict(int)
@@ -40,6 +43,7 @@ def analyze_costs() -> dict[str, Any]:
     per_day_out: dict[str, int] = defaultdict(int)
     per_provider_in: dict[str, int] = defaultdict(int)
     per_provider_out: dict[str, int] = defaultdict(int)
+    durations: list[float] = []
     total_in = total_out = 0
     try:
         with _ATTEMPTS_PATH.open("r", encoding="utf-8") as f:
@@ -66,6 +70,9 @@ def analyze_costs() -> dict[str, Any]:
                 per_provider_out[prov] += tout
                 total_in += tin
                 total_out += tout
+                dur = e.get("duration_sec")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    durations.append(float(dur))
     except OSError:
         pass
 
@@ -105,6 +112,12 @@ def analyze_costs() -> dict[str, Any]:
         for p in set(list(per_provider_in) + list(per_provider_out))
     }
 
+    durations.sort()
+    def _pct(xs: list[float], p: float) -> float:
+        if not xs:
+            return 0.0
+        idx = min(len(xs) - 1, max(0, int(round(p / 100.0 * (len(xs) - 1)))))
+        return round(xs[idx], 2)
     return {
         "total_cost_usd": round(_cost(total_in, total_out), 4),
         "total_input_tokens": total_in,
@@ -112,4 +125,9 @@ def analyze_costs() -> dict[str, Any]:
         "top_features": features[:25],
         "daily": daily[-30:],  # last 30 days
         "providers": providers,
+        "duration_percentiles": {
+            "p50": _pct(durations, 50),
+            "p95": _pct(durations, 95),
+            "sample_count": len(durations),
+        },
     }
