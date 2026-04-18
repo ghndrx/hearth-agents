@@ -18,8 +18,10 @@ ARCHIVE_INTERVAL_SEC = 24 * 60 * 60
 
 async def run_archive(backlog: Backlog) -> None:
     """Background task: archive done features older than 7d, daily."""
+    from .heartbeat import beat
     await asyncio.sleep(ARCHIVE_INTERVAL_SEC)
     while True:
+        beat("archive")
         try:
             n = backlog.archive_old_done(max_age_days=7)
             if n:

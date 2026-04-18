@@ -110,7 +110,9 @@ def _fire(entry: ScheduleEntry, backlog: Backlog) -> bool:
 async def run_scheduler(backlog: Backlog) -> None:
     """Background task. Re-reads the schedule file each tick so operators
     can edit it live without a restart."""
+    from .heartbeat import beat
     while True:
+        beat("scheduler")
         try:
             entries = _load_entries()
             import time as _t

@@ -550,8 +550,10 @@ def _beat(worker_id: int, feature_id: str) -> None:
 
 async def _watchdog() -> None:
     """Background task: scan heartbeat dict every 60s, log stuck workers."""
+    from .heartbeat import beat
     import time as _t
     while True:
+        beat("watchdog")
         await asyncio.sleep(60)
         now = _t.time()
         for wid, (ts, fid) in list(_worker_heartbeat.items()):
@@ -1490,7 +1492,9 @@ async def _autoscaler(
     lo = settings.loop_autoscale_low_water
     if floor == ceiling:
         return  # autoscaling disabled
+    from .heartbeat import beat
     while True:
+        beat("autoscaler")
         await asyncio.sleep(60)
         pending = sum(1 for f in backlog.features if f.status == "pending")
         current = len(worker_tasks)

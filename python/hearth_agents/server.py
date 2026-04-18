@@ -51,7 +51,14 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "stats": backlog.stats()}
+        from .heartbeat import status as _status
+        subs = _status()
+        any_stale = any(v["stale"] for v in subs.values())
+        return {
+            "status": "degraded" if any_stale else "ok",
+            "stats": backlog.stats(),
+            "subsystems": subs,
+        }
 
     @app.get("/features")
     async def list_features(status: str | None = None) -> list[dict[str, Any]]:
@@ -77,6 +84,30 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             key=lambda d: d["updated_at"],
             reverse=True,
         )
+
+    @app.post("/features/bulk")
+    async def create_features_bulk(payload: dict[str, Any]) -> dict[str, Any]:
+        """Enqueue many features at once. Body: {"features": [...]}.
+        Each entry uses the same schema as POST /features. Returns
+        per-entry outcome so callers can tell which failed validation
+        and why. Useful for ingesting a project plan or quarterly
+        roadmap as one upload."""
+        items = payload.get("features") or []
+        if not isinstance(items, list):
+            raise HTTPException(status_code=400, detail="features must be a list")
+        results: list[dict[str, Any]] = []
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                results.append({"index": i, "ok": False, "error": "not an object"})
+                continue
+            try:
+                # Reuse the single-feature handler for validation parity.
+                resp = await create_feature(item)
+                results.append({"index": i, "ok": True, "id": resp.get("id")})
+            except HTTPException as e:
+                results.append({"index": i, "ok": False, "error": e.detail})
+        ok_count = sum(1 for r in results if r["ok"])
+        return {"submitted": len(items), "ok": ok_count, "failed": len(items) - ok_count, "results": results}
 
     @app.post("/features")
     async def create_feature(payload: dict[str, Any]) -> dict[str, Any]:
@@ -220,14 +251,27 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         }
 
     @app.get("/transitions")
-    async def transitions(limit: int = 500) -> list[dict[str, Any]]:
-        """Recent status-change entries. Read from /data/transitions.jsonl,
-        which only began populating with commit 608d1ff — older history
-        isn't here. Cap limit at 5000 to stop a runaway query from reading
-        an arbitrarily large file into memory."""
+    async def transitions(
+        limit: int = 500,
+        feature_id: str | None = None,
+        prompts_version: str | None = None,
+        actor: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recent status-change entries with optional filtering.
+
+        Filters compose: a request with both prompts_version=X and
+        actor=Y returns transitions matching BOTH. Each filter is exact-
+        match. Limit caps post-filter results.
+        """
         from .transitions import read_tail
         capped = max(1, min(limit, 5000))
-        return read_tail(limit=capped)
+        # read_tail handles feature_id; apply other filters here.
+        rows = read_tail(limit=20000, feature_id=feature_id) if feature_id else read_tail(limit=20000)
+        if prompts_version:
+            rows = [r for r in rows if r.get("prompts_version") == prompts_version]
+        if actor:
+            rows = [r for r in rows if r.get("actor") == actor]
+        return rows[-capped:]
 
     @app.get("/prompt-analytics")
     async def prompt_analytics() -> dict[str, Any]:
@@ -380,6 +424,23 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         now = datetime_utcnow_ts()
         window = 24 * 60 * 60
         recent = [f for f in features if _age_sec(f.created_at) <= window]
+        # 7-day daily trendline: done & blocked per day, scoped to this repo.
+        trendline: dict[str, dict[str, int]] = {}
+        from datetime import timedelta
+        for offset in range(7):
+            day = (datetime.now(timezone.utc) - timedelta(days=offset)).strftime("%Y-%m-%d")
+            trendline[day] = {"done": 0, "blocked": 0}
+        for f in features:
+            day = (f.created_at or "")[:10]
+            if day in trendline:
+                if f.status == "done":
+                    trendline[day]["done"] += 1
+                elif f.status == "blocked":
+                    trendline[day]["blocked"] += 1
+        trend = sorted(
+            ({"day": k, **v} for k, v in trendline.items()),
+            key=lambda d: d["day"],
+        )
         return {
             "repo": repo_name,
             "total": len(features),
@@ -391,6 +452,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 "done": sum(1 for f in recent if f.status == "done"),
                 "blocked": sum(1 for f in recent if f.status == "blocked"),
             },
+            "trendline_7d": trend,
             "top_block_reasons": [{"reason": r, "count": c} for r, c in reasons.most_common(5)],
         }
 

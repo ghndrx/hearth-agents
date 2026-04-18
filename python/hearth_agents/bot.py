@@ -172,6 +172,52 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             lines.append(f"  w{wid}: {info['feature']} ({info['age_sec']}s ago)")
         await msg.answer("\n".join(lines))
 
+    @dp.message(Command("debate"))
+    async def _debate(msg: Message, command: CommandObject) -> None:
+        fid = (command.args or "").strip()
+        if not fid:
+            await msg.answer("Usage: /debate <feature_id>\nRuns Kimi + MiniMax in parallel; doubles spend.")
+            return
+        feature = next((f for f in backlog.features if f.id == fid), None)
+        if feature is None:
+            await msg.answer(f"Feature {fid} not found.")
+            return
+        await msg.answer(f"🗣 Starting debate on {fid}. This doubles token spend; results in ~1-3 min.")
+        from .debate import run_debate
+        # Dig fallback agent out of where main.py stashed it. Bot starts
+        # before main wires app.state, so we re-import models here.
+        from .models import build_minimax
+        try:
+            fallback = build_minimax()
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"debate aborted: fallback agent unavailable ({e})")
+            return
+        try:
+            from .agent import build_fallback_agent
+            fb_agent = build_fallback_agent()
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"debate aborted: fallback agent build failed ({e})")
+            return
+        try:
+            res = await run_debate(feature, backlog, agent, fb_agent)
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"debate failed: {e}")
+            return
+        if "error" in res:
+            await msg.answer(f"debate skipped: {res['error']}")
+            return
+        lines = [f"🗣 Debate on {fid}:"]
+        for r in res.get("results", []):
+            tag = r.get("tag", "?")
+            if r.get("error"):
+                lines.append(f"  {tag}: ERROR — {r['error']}")
+                continue
+            lines.append(
+                f"  {tag}: {r['tool_count']} tool calls, "
+                f"{r['input_tokens']:,}in/{r['output_tokens']:,}out"
+            )
+        await msg.answer("\n".join(lines))
+
     # Any non-command text becomes a one-shot agent invocation.
     @dp.message(F.text & ~F.text.startswith("/"))
     async def _freeform(msg: Message) -> None:

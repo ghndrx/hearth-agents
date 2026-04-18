@@ -157,10 +157,12 @@ def _hint_for_reason(reason: str) -> str:
 
 async def run_healer(backlog: Backlog) -> None:
     """Background task: periodically resurrect blocked features."""
+    from .heartbeat import beat
     notifier = Notifier()
     log.info("healer_started", interval_sec=HEAL_INTERVAL_SEC, max_attempts=HEAL_MAX_ATTEMPTS)
     try:
         while True:
+            beat("healer")
             healed: list[str] = []
             escalated: list[str] = []
             for f in list(backlog.features):

@@ -29,11 +29,13 @@ REGRESSION_RATIO = 0.80
 
 async def run_drift_alarm() -> None:
     """Background task. Emits at most one alert per (version, boot)."""
+    from .heartbeat import beat
     notifier = Notifier()
     alerted_versions: set[str] = set()
     await asyncio.sleep(DRIFT_INTERVAL_SEC)
     try:
         while True:
+            beat("drift_alarm")
             try:
                 _check_and_alert(alerted_versions, notifier)
             except Exception as e:  # noqa: BLE001
