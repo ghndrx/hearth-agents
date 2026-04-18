@@ -224,6 +224,11 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         labels = payload.get("labels") or []
         if not isinstance(labels, list) or not all(isinstance(l, str) for l in labels):
             raise HTTPException(status_code=400, detail="labels must be a list of strings")
+        # Auto-label inference when caller didn't provide any. Operator-
+        # supplied labels always win; inference ONLY fires on empty.
+        if not labels:
+            from .auto_label import infer_labels
+            labels = infer_labels(name, desc_raw)
         feature = Feature(
             id=fid,
             name=name,
@@ -1283,6 +1288,107 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "circuit_breaker": circuit_state(),
             "workers": watchdog_state(),
         }
+
+    @app.get("/labels")
+    async def labels_aggregate() -> dict[str, Any]:
+        """Per-label counts + status breakdown. Rolls over every
+        Feature.labels entry, groups by label + status. Sorted by
+        total count desc. Lets operators find heavy / neglected
+        labels at a glance."""
+        from collections import Counter, defaultdict
+        label_status: dict[str, Counter[str]] = defaultdict(Counter)
+        for f in backlog.features:
+            for l in (f.labels or []):
+                label_status[l][f.status] += 1
+        out = []
+        for label, statuses in label_status.items():
+            total = sum(statuses.values())
+            done = statuses.get("done", 0)
+            blocked = statuses.get("blocked", 0)
+            out.append({
+                "label": label,
+                "total": total,
+                "done": done,
+                "blocked": blocked,
+                "pending": statuses.get("pending", 0),
+                "implementing": statuses.get("implementing", 0),
+                "done_rate": round(done / (done + blocked), 3) if (done + blocked) else 0.0,
+            })
+        out.sort(key=lambda d: -d["total"])
+        return {"labels": out, "total_labels": len(out)}
+
+    @app.get("/dashboard/label/{label}")
+    async def dashboard_by_label(label: str) -> dict[str, Any]:
+        """Per-label rollup. Same shape as /dashboard/{repo} but
+        scoped to features carrying this label."""
+        from collections import Counter
+        features = [f for f in backlog.features if label in (f.labels or [])]
+        if not features:
+            raise HTTPException(status_code=404, detail=f"no features with label '{label}'")
+        status_counts: Counter[str] = Counter()
+        kind_counts: Counter[str] = Counter()
+        repo_counts: Counter[str] = Counter()
+        reasons: Counter[str] = Counter()
+        for f in features:
+            status_counts[f.status] += 1
+            kind_counts[f.kind] += 1
+            for r in f.repos:
+                repo_counts[r] += 1
+            if f.status == "blocked":
+                prefix = (f.heal_hint or "(no hint)")[:60].strip().rstrip(":").rstrip(".")
+                reasons[prefix] += 1
+        return {
+            "label": label,
+            "total": len(features),
+            "by_status": dict(status_counts),
+            "by_kind": dict(kind_counts),
+            "by_repo": dict(repo_counts),
+            "top_block_reasons": [{"reason": r, "count": c} for r, c in reasons.most_common(5)],
+        }
+
+    @app.post("/features/from-template")
+    async def features_from_template(payload: dict[str, Any]) -> dict[str, Any]:
+        """Spawn a Feature from a named template. Body:
+          {template: str, overrides: {id, name, description, repos?, labels?, ...}}
+
+        Templates live in ``settings.feature_templates_path`` (JSON
+        dict). Each entry is a Feature-shaped skeleton. The POST body
+        overrides fields. id+name+description in the overrides are
+        required. Reduces boilerplate for repetitive Feature shapes
+        (api-endpoint, schema-migration, a11y-bug, etc)."""
+        import json as _json
+        from pathlib import Path as _P
+        from .backlog import Feature
+        name = payload.get("template") or ""
+        overrides = payload.get("overrides") or {}
+        if not name:
+            raise HTTPException(status_code=400, detail="template required")
+        tpath = _P(settings.feature_templates_path)
+        if not tpath.exists():
+            raise HTTPException(status_code=404, detail=f"templates file not found at {tpath}")
+        try:
+            templates = _json.loads(tpath.read_text())
+        except (OSError, _json.JSONDecodeError) as e:
+            raise HTTPException(status_code=500, detail=f"templates parse failed: {e}")
+        base = templates.get(name)
+        if base is None:
+            raise HTTPException(status_code=404, detail=f"template '{name}' not in {list(templates)}")
+        merged = {**base, **overrides}
+        required = ("id", "name", "description")
+        missing = [k for k in required if not merged.get(k)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"missing required fields: {missing}")
+        # Strip fields the dataclass doesn't know about.
+        valid = {
+            "id", "name", "description", "priority", "repos", "research_topics",
+            "discord_parity", "kind", "risk_tier", "depends_on", "labels",
+            "repro_command", "acceptance_criteria", "budget_usd",
+        }
+        feature = Feature(**{k: v for k, v in merged.items() if k in valid})
+        if not backlog.add(feature):
+            raise HTTPException(status_code=409, detail=f"feature {feature.id} already exists")
+        log.info("feature_from_template", template=name, feature_id=feature.id)
+        return {"ok": True, "id": feature.id}
 
     @app.get("/dep-graph")
     async def dep_graph() -> dict[str, Any]:

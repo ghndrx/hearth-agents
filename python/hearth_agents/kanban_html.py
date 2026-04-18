@@ -99,6 +99,7 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="loadSchedule()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">schedule</button>
       <button @click="loadDepGraph()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">deps</button>
       <button @click="loadSnapshots()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">diff</button>
+      <button @click="openViews = !openViews" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">views</button>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()"
               class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed">
         approve blocked
@@ -108,6 +109,18 @@ KANBAN_HTML = r"""<!doctype html>
         retry escalated
       </button>
     </div>
+  </div>
+
+  <!-- Saved views (localStorage) -->
+  <div class="px-5 pb-2 flex items-center gap-2 flex-wrap" x-show="openViews">
+    <span class="text-[10px] uppercase tracking-wider text-muted font-medium">views</span>
+    <template x-for="v in savedViews" :key="v.name">
+      <button @click="applyView(v)" class="text-[10px] px-2 py-0.5 rounded-md bg-surface border border-border hover:border-accent">
+        <span x-text="v.name"></span>
+        <span @click.stop="deleteView(v.name)" class="ml-1 text-muted hover:text-blocked cursor-pointer">×</span>
+      </button>
+    </template>
+    <button @click="saveCurrentView()" class="text-[10px] px-2 py-0.5 rounded-md bg-done/20 text-done hover:bg-done/30" title="Save current filter + kind + risk as named view">+ save current</button>
   </div>
 
   <!-- Block-reasons strip -->
@@ -524,6 +537,8 @@ function kanban() {
     filterText: '',
     kindFilter: '',
     riskFilter: '',
+    openViews: false,
+    savedViews: [],
     selectedId: null,
     toast: '',
     toastErr: false,
@@ -545,6 +560,7 @@ function kanban() {
       }));
     },
     init() {
+      this.loadViews();
       this.refresh();
       // Poll every 30s as a backstop for SSE drops; SSE handles real-time.
       setInterval(() => this.refresh(), 30000);
@@ -832,6 +848,32 @@ function kanban() {
         const body = await r.json();
         this.history[id] = body.transitions || [];
       } catch (e) { this.flash('history fetch failed: ' + e.message, true); }
+    },
+    loadViews() {
+      try {
+        const raw = localStorage.getItem('hearth_saved_views');
+        this.savedViews = raw ? JSON.parse(raw) : [];
+      } catch (e) { this.savedViews = []; }
+    },
+    persistViews() {
+      try { localStorage.setItem('hearth_saved_views', JSON.stringify(this.savedViews)); } catch (e) { /* ignore */ }
+    },
+    saveCurrentView() {
+      const name = prompt('Name this view (e.g. "my-bugs", "q2-blockers"):');
+      if (!name) return;
+      this.savedViews = this.savedViews.filter(v => v.name !== name);
+      this.savedViews.push({ name, filterText: this.filterText, kindFilter: this.kindFilter, riskFilter: this.riskFilter });
+      this.persistViews();
+      this.flash('saved view: ' + name);
+    },
+    applyView(v) {
+      this.filterText = v.filterText || '';
+      this.kindFilter = v.kindFilter || '';
+      this.riskFilter = v.riskFilter || '';
+    },
+    deleteView(name) {
+      this.savedViews = this.savedViews.filter(v => v.name !== name);
+      this.persistViews();
     },
     ageLabel(iso) {
       if (!iso) return '';

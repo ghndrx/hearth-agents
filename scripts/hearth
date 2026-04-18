@@ -306,6 +306,26 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_labels(args: list[str]) -> None:
+    """List every label + per-label counts."""
+    d = _req("GET", "/labels")
+    for row in d.get("labels", []):
+        print(f"  #{row['label']:20s} total={row['total']:4d}  done={row['done']:4d}  blocked={row['blocked']:3d}  rate={row['done_rate']:.2f}")
+    print(f"\n{d.get('total_labels', 0)} labels in use")
+
+
+def cmd_template(args: list[str]) -> None:
+    """hearth template <name> <id> <feature-name> <description>"""
+    if len(args) < 4:
+        print("usage: hearth template <template_name> <id> <feature_name> <description>", file=sys.stderr); sys.exit(2)
+    tmpl, fid, fname, desc = args[0], args[1], args[2], " ".join(args[3:])
+    r = _req("POST", "/features/from-template", body={
+        "template": tmpl,
+        "overrides": {"id": fid, "name": fname, "description": desc},
+    })
+    print(f"queued from template '{tmpl}': {r}")
+
+
 def cmd_doctor(args: list[str]) -> None:
     """Self-check every integration. Reports reachable + time per check.
     Prints green/red summary. Exits non-zero when any check fails.
@@ -517,6 +537,7 @@ COMMANDS = {
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
     "top": cmd_top, "debug": cmd_debug, "doctor": cmd_doctor,
+    "labels": cmd_labels, "template": cmd_template,
 }
 
 

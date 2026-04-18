@@ -1,0 +1,38 @@
+{
+  "api-endpoint": {
+    "priority": "medium",
+    "kind": "feature",
+    "repos": ["hearth"],
+    "labels": ["api"],
+    "acceptance_criteria": "Endpoint returns expected response shape; integration test exercising the happy path + one error path passes."
+  },
+  "schema-migration": {
+    "priority": "high",
+    "kind": "schema",
+    "repos": ["hearth"],
+    "labels": ["schema"],
+    "acceptance_criteria": "Forward migration, backfill, and rollback test all present; rollback test proves inverse returns pre-migration state."
+  },
+  "a11y-bug": {
+    "priority": "high",
+    "kind": "bug",
+    "repos": ["hearth"],
+    "labels": ["a11y", "ui"],
+    "repro_command": "npm run a11y:check",
+    "acceptance_criteria": "axe-core reports zero new violations; keyboard navigation reaches the new element; visible-focus ring present."
+  },
+  "prompt-tune": {
+    "priority": "high",
+    "kind": "feature",
+    "repos": ["hearth-agents"],
+    "labels": ["self"],
+    "acceptance_criteria": "After prompts_version bump, /prompt-analytics shows the new version's done_rate >= 0.95 of the prior best-trusted version across 20+ terminal transitions."
+  },
+  "dep-bump-major": {
+    "priority": "medium",
+    "kind": "security",
+    "repos": ["hearth"],
+    "labels": ["security"],
+    "acceptance_criteria": "verify_staged green, no SYMBOL_UNRESOLVED, release notes captured in the commit body."
+  }
+}

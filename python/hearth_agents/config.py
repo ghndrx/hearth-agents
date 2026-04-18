@@ -123,6 +123,7 @@ class Settings(BaseSettings):
 
     # Persistence
     backlog_path: str = "/data/backlog.json"
+    feature_templates_path: str = "/data/feature_templates.json"
 
     @property
     def allowed_chat_ids(self) -> set[int]:
