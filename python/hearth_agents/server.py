@@ -329,6 +329,55 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "workers": watchdog_state(),
         }
 
+    @app.post("/webhooks/alert")
+    async def alert_webhook(payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalize alert payloads from PagerDuty / Grafana / Datadog
+        into an incident Feature. Research #3833 (SRE role replacement):
+        a single normalized alert schema gated by risk tier is the
+        minimum viable ingest path.
+
+        Risk tier rule of thumb:
+          - high: production customer-facing impact; agent builds a
+            mitigation PR as draft, human Telegram approval required.
+          - medium: degraded internal service; PR opens as draft.
+          - low: flapping / informational; PR auto-opens normally.
+
+        Payload (accepts any of the common alert providers; fields we
+        read are best-effort — missing fields fall back to defaults):
+          - service, summary, severity, fired_at, dedupe_key
+        """
+        from .backlog import Feature
+        from .sanitize import sanitize as _sanitize
+        service = (payload.get("service") or payload.get("source") or "unknown")[:40]
+        summary = (payload.get("summary") or payload.get("title") or payload.get("description") or "").strip()
+        severity = (payload.get("severity") or payload.get("urgency") or "medium").lower()
+        dedupe = (payload.get("dedupe_key") or payload.get("incident_key") or "")[:40]
+        if not summary:
+            raise HTTPException(status_code=400, detail="summary/title required")
+        risk_tier = "high" if severity in ("critical", "p1", "sev1", "high") else "medium" if severity in ("warning", "p2", "sev2") else "low"
+        # Sanitize the external summary — a compromised alert source
+        # could carry injection.
+        sres = _sanitize(summary, provenance=f"alert:{service}", max_len=4000)
+        if sres.rejected:
+            raise HTTPException(status_code=400, detail=f"summary rejected: {sres.reject_reason}")
+        # Stable feature_id so repeated alerts on the same incident don't
+        # create duplicates; use dedupe_key if provided, else timestamp.
+        import time as _t
+        fid = f"incident-{dedupe or int(_t.time())}"[:60]
+        feature = Feature(
+            id=fid,
+            name=f"[{severity}] {service}: {summary[:80]}",
+            description=sres.safe_text,
+            priority="critical" if risk_tier == "high" else "high",
+            repos=[payload.get("repo") or "hearth"],  # type: ignore[list-item]
+            kind="incident",
+            risk_tier=risk_tier,  # type: ignore[arg-type]
+            acceptance_criteria="Service recovered; post-incident report filed as comment on PR",
+        )
+        added = backlog.add(feature)
+        log.info("alert_ingested", service=service, severity=severity, tier=risk_tier, added=added, feature_id=fid)
+        return {"ok": True, "feature_id": fid, "added": added, "risk_tier": risk_tier}
+
     @app.post("/webhooks/github")
     async def github_webhook(request: Request) -> dict[str, Any]:
         raw = await request.body()
@@ -356,6 +405,18 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 await agent.ainvoke(
                     {"messages": [{"role": "user", "content": structured["prompt"]}]}
                 )
+        elif event == "pull_request":
+            # Conventional-commits gate (research #3834). Flag PRs whose
+            # title doesn't parse as a conventional-commit header so the
+            # agent (or a future bot) can comment back asking for a
+            # rename. Non-blocking — just a log signal today.
+            from .commitlint import parse as _parse
+            pr_title = ((payload.get("pull_request") or {}).get("title") or "").strip()
+            parsed = _parse(pr_title)
+            if not parsed:
+                log.warning("pr_title_not_conventional", title=pr_title[:120])
+            else:
+                log.info("pr_title_parsed", type=parsed.type, bump=parsed.bump)
         elif event == "workflow_run":
             # Live CI ingestion (research #3801): a failing GitHub Actions
             # run on one of our feat/ branches flips the feature back to

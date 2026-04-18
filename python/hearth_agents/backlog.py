@@ -14,7 +14,8 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
-Kind = Literal["feature", "bug", "refactor", "schema", "security"]
+Kind = Literal["feature", "bug", "refactor", "schema", "security", "incident", "perf-revert"]
+RiskTier = Literal["low", "medium", "high"]
 
 
 def _norm_name(name: str) -> str:
@@ -71,6 +72,11 @@ class Feature:
     # empty; added regression test". Separate from description so the
     # agent's ACCEPTANCE statement has a concrete target.
     acceptance_criteria: str = ""
+    # For incident + perf-revert kinds: gates auto-merge / auto-PR.
+    # high = human Telegram approval required before anything goes to origin
+    # medium = PR opens but is draft
+    # low = normal auto-PR flow (default)
+    risk_tier: RiskTier = "low"
 
     def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived
@@ -97,6 +103,7 @@ class Feature:
             "parent_id": self.parent_id,
             "planner_estimate_lines": self.planner_estimate_lines,
             "kind": self.kind,
+            "risk_tier": self.risk_tier,
             "repro_command": self.repro_command[:200],
             "acceptance_criteria": self.acceptance_criteria[:400],
             "branch": branch,
