@@ -12,6 +12,7 @@ route through it) rather than having two paths to the same data.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -33,7 +34,7 @@ def _req(method: str, path: str, body: dict | None = None, params: dict | None =
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
-    except urllib.error.HTTPError as e:  # type: ignore[name-defined]
+    except urllib.error.HTTPError as e:
         return {"error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)[:200]}

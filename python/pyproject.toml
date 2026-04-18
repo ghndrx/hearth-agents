@@ -19,7 +19,7 @@ dependencies = [
     "aiogram>=3.13.0",
     "rank-bm25>=0.2.2",
     "radon>=6.0.1",
-    "langfuse>=2.60.0",
+    "langfuse>=2.60.0,<3.0",
 ]
 
 [project.scripts]
