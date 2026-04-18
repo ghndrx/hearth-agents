@@ -67,7 +67,17 @@ def wikidelve_read(kb: str, slug: str) -> str:
             r = c.get(f"/api/articles/{kb}/{slug}")
             r.raise_for_status()
             md = r.json().get("raw_markdown", "")
-        return md[:30_000] + ("\n... (truncated)" if len(md) > 30_000 else "")
+        # Sanitize externally-sourced content before returning — a
+        # research article could carry "ignore previous instructions"
+        # that would land directly in agent context. Rejected content
+        # returns a short operator-visible note; the agent doesn't see
+        # the payload (research #3817).
+        from ..sanitize import sanitize as _sanitize
+        truncated = md[:30_000] + ("\n... (truncated)" if len(md) > 30_000 else "")
+        sres = _sanitize(truncated, provenance=f"wikidelve:{kb}:{slug}", max_len=30_000)
+        if sres.rejected:
+            return f"(wikidelve article rejected by sanitizer: {sres.reject_reason})"
+        return sres.safe_text
     except Exception as e:
         log.warning("wikidelve_read_failed", slug=slug, error=str(e))
         return f"Article not found: {e}"

@@ -388,6 +388,54 @@ def _note_usage(provider: str, input_tokens: int, output_tokens: int) -> None:
             olog.pop(0)
 
 
+def _append_attempt_log(
+    feature_id: str,
+    attempt: int,
+    provider: str,
+    result: Any,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Append one line per attempt to ``/data/attempts.jsonl``. Foundation
+    for the debugging-session-replay tooling (research #3807) — captures
+    which tools were called with what args in what order, plus token
+    usage. Tool arg values are truncated and stringified defensively so
+    a non-JSON-serializable tool arg can't break the loop."""
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    from pathlib import Path as _P
+    tool_trace: list[dict] = []
+    try:
+        for m in (result or {}).get("messages", []) or []:
+            tcs = getattr(m, "tool_calls", None) or []
+            for tc in tcs:
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}) or {}
+                try:
+                    args_repr = _json.dumps(args, default=str)[:400]
+                except (TypeError, ValueError):
+                    args_repr = str(args)[:400]
+                tool_trace.append({"name": name, "args": args_repr})
+    except (AttributeError, TypeError):
+        pass
+    entry = {
+        "ts": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+        "feature_id": feature_id,
+        "attempt": attempt,
+        "provider": provider,
+        "input_tokens": int(input_tokens),
+        "output_tokens": int(output_tokens),
+        "tool_calls": tool_trace[:200],  # cap so a stuck loop can't bloat
+    }
+    path = _P("/data/attempts.jsonl")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry) + "\n")
+    except OSError as e:
+        log.warning("attempt_log_write_failed", err=str(e)[:160], feature=feature_id)
+
+
 def _extract_token_usage(result: Any) -> tuple[int, int]:
     """Walk a LangChain agent result's messages for AIMessage.response_metadata
     token_usage and sum input/output. Returns (0, 0) on any extraction
@@ -464,6 +512,30 @@ def _throttle_for_rate_approach(worker_id: int) -> None:
 # cancel when we trust the signal.
 _worker_heartbeat: dict[int, tuple[float, str]] = {}   # worker_id → (ts, feature_id)
 STUCK_THRESHOLD_SEC = int(settings.per_feature_timeout_sec * 1.5)
+
+# Per-feature token accumulator. Reset per feature (not per attempt) so a
+# feature that spirals across 6 fixups trips the cap. Rough $/token pricing
+# to turn tokens into settings.per_feature_budget_usd comparisons. Numbers
+# are conservative upper bounds; precise cost accounting lives elsewhere.
+_PRICE_IN_PER_1M = 0.30   # $/1M input tokens (conservative Kimi/MiniMax upper)
+_PRICE_OUT_PER_1M = 1.20  # $/1M output tokens
+_per_feature_tokens: dict[str, dict[str, int]] = {}
+
+
+def _add_feature_tokens(feature_id: str, input_tokens: int, output_tokens: int) -> float:
+    """Accumulate tokens for a feature and return the running $ cost.
+    Zero if inputs are zero (nothing to add)."""
+    if input_tokens <= 0 and output_tokens <= 0:
+        return 0.0
+    bucket = _per_feature_tokens.setdefault(feature_id, {"in": 0, "out": 0})
+    bucket["in"] += max(0, int(input_tokens))
+    bucket["out"] += max(0, int(output_tokens))
+    cost = (bucket["in"] / 1_000_000) * _PRICE_IN_PER_1M + (bucket["out"] / 1_000_000) * _PRICE_OUT_PER_1M
+    return cost
+
+
+def _reset_feature_tokens(feature_id: str) -> None:
+    _per_feature_tokens.pop(feature_id, None)
 
 
 def _beat(worker_id: int, feature_id: str) -> None:
@@ -889,6 +961,28 @@ async def run_once(
             # without aggregating usage) are silently skipped.
             in_tok, out_tok = _extract_token_usage(result)
             _note_usage(active_provider, in_tok, out_tok)
+            # Per-feature spend cap: abort the iterate loop when the
+            # accumulated cost for THIS feature crosses the configured
+            # budget. Caps doomed features from burning through quota
+            # across 6 fixups (research note: ~90% of retries don't
+            # recover; we already bail on unsolvable signals, now we
+            # also bail on cost alone).
+            running_cost = _add_feature_tokens(feature.id, in_tok, out_tok)
+            if settings.per_feature_budget_usd > 0 and running_cost >= settings.per_feature_budget_usd:
+                log.warning(
+                    "feature_budget_exhausted",
+                    id=feature.id,
+                    spent_usd=round(running_cost, 3),
+                    budget_usd=settings.per_feature_budget_usd,
+                    attempt=attempt,
+                )
+                reason = f"budget_exhausted: spent ${running_cost:.3f} of ${settings.per_feature_budget_usd:.2f}"
+                verdict = "blocked"
+                break
+            # Persist this attempt's tool-call fingerprint log so future
+            # debugging-session-replay tooling (research #3807) has the
+            # raw trace to work against. Cheap append-only JSONL.
+            _append_attempt_log(feature.id, attempt, active_provider, result, in_tok, out_tok)
             last = result["messages"][-1].content if result.get("messages") else ""
             claimed = "blocked" if _agent_self_reports_blocked(last) else "done"
             # Rescue stray diffs: if the agent wrote files in a worktree but
@@ -940,6 +1034,10 @@ async def run_once(
         status_reason = (f"rescued={attempt_rescued} " if attempt_rescued else "") + (reason or "")
         backlog.set_status(feature.id, verdict, reason=status_reason[:500])
         _record_verdict(verdict, provider=active_provider)
+        # Reset the per-feature token accumulator once a terminal
+        # verdict is recorded — next run of the same feature ID (via
+        # re-queue or healer) gets a fresh budget.
+        _reset_feature_tokens(feature.id)
         if verdict == "done":
             # Clear the heal hint so future re-runs (idea engine duplicates,
             # manual re-queues) start from a clean prompt instead of carrying
