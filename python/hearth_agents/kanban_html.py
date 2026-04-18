@@ -187,6 +187,9 @@ KANBAN_HTML = r"""<!doctype html>
                       :class="f.risk_tier === 'high' ? 'bg-blocked/20 text-blocked' : 'bg-high/20 text-high'"
                       x-text="'risk: ' + f.risk_tier"></span>
               </template>
+              <template x-for="l in (f.labels || [])" :key="l">
+                <button @click.stop="filterText = l" class="text-[9px] px-1.5 py-0.5 rounded bg-accent/15 text-accent hover:bg-accent/25" :title="'click to filter by label: ' + l" x-text="'#' + l"></button>
+              </template>
               <template x-if="costByFeature[f.id] && costByFeature[f.id] > 0">
                 <span class="text-[9px] px-1.5 py-0.5 rounded bg-done/10 text-done font-mono tabular-nums" title="tokens spent on this feature" x-text="'$' + costByFeature[f.id].toFixed(3)"></span>
               </template>
@@ -547,13 +550,36 @@ function kanban() {
       setInterval(() => this.refresh(), 30000);
       setInterval(() => { this.sinceLabel = Math.floor((Date.now() - this.lastRefresh) / 1000).toString(); }, 1000);
       // Subscribe to Server-Sent Events so transitions land instantly
-      // instead of waiting for the next poll. Auto-reconnects on drop.
+      // instead of waiting for the next poll. On drop the browser
+      // auto-reconnects; we also backfill any missed events via
+      // /events/replay?from_ts so the board stays consistent across
+      // a network partition instead of waiting 30s for the poll.
       try {
+        let lastEventTs = new Date().toISOString();
         const src = new EventSource('/events');
-        src.addEventListener('transition', () => {
-          this.refresh();  // fetch fresh /features on any transition
+        src.addEventListener('transition', async (e) => {
+          try {
+            const entry = JSON.parse(e.data);
+            if (entry && entry.ts) lastEventTs = entry.ts;
+          } catch (err) { /* ignore */ }
+          this.refresh();
         });
-        src.onerror = () => { /* browser auto-reconnects */ };
+        src.onopen = async () => {
+          // Reconnect hook: pull any transitions we missed since
+          // lastEventTs. Empty on first open. Cheap; /events/replay
+          // just walks the on-disk JSONL with a ts cutoff.
+          try {
+            const r = await fetch('/events/replay?from_ts=' + encodeURIComponent(lastEventTs) + '&limit=100');
+            if (r.ok) {
+              const missed = await r.json();
+              if (missed.length) {
+                this.flash('reconnected — backfilled ' + missed.length + ' event(s)');
+                this.refresh();
+              }
+            }
+          } catch (err) { /* ignore */ }
+        };
+        src.onerror = () => { /* browser auto-reconnects; onopen fires backfill */ };
       } catch (e) { /* EventSource unsupported; polling fallback covers us */ }
       document.addEventListener('keydown', (e) => {
         const tag = (e.target && e.target.tagName || '').toLowerCase();

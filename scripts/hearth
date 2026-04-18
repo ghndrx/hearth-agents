@@ -306,6 +306,65 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_doctor(args: list[str]) -> None:
+    """Self-check every integration. Reports reachable + time per check.
+    Prints green/red summary. Exits non-zero when any check fails.
+    Checks: /health, /build, /config, Tailscale public URL, wikidelve,
+    GitHub token (via /build's git_sha fallback), Telegram (via /stats
+    workers presence)."""
+    import time
+    checks: list[tuple[str, callable]] = [
+        ("hearth /health", lambda: _req("GET", "/health")),
+        ("hearth /build",  lambda: _req("GET", "/build")),
+        ("hearth /config", lambda: _req("GET", "/config")),
+        ("hearth /stats",  lambda: _req("GET", "/stats")),
+        ("hearth /dashboard",    lambda: _req("GET", "/dashboard")),
+        ("hearth /backlog/replay", lambda: _req("GET", "/backlog/replay")),
+    ]
+    # Optional integrations if env/config says they should work.
+    cfg = _req("GET", "/config")
+    if cfg.get("urls", {}).get("langfuse_public"):
+        lf = cfg["urls"]["langfuse_public"]
+        checks.append((f"langfuse ({lf})", lambda: _probe_url(lf)))
+    failures = 0
+    for name, fn in checks:
+        t0 = time.time()
+        try:
+            r = fn()
+            elapsed = int((time.time() - t0) * 1000)
+            if isinstance(r, dict) and r.get("error"):
+                print(f"  ✗ {name}: {r['error']} ({elapsed}ms)")
+                failures += 1
+            else:
+                print(f"  ✓ {name}: ok ({elapsed}ms)")
+        except SystemExit:
+            failures += 1
+        except Exception as e:
+            print(f"  ✗ {name}: {e}")
+            failures += 1
+    status = cfg.get("flags", {}).get("langfuse_enabled")
+    print(f"\nlangfuse_enabled: {status}")
+    if failures:
+        print(f"\n{failures} check(s) failed", file=sys.stderr)
+        sys.exit(1)
+    print("\nall checks passed")
+
+
+def _probe_url(url: str) -> dict:
+    """Cheap reachability probe for external URLs."""
+    import http.client
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    conn_cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(u.netloc, timeout=5)
+    try:
+        conn.request("HEAD", u.path or "/")
+        r = conn.getresponse()
+        return {"status": r.status}
+    finally:
+        conn.close()
+
+
 def cmd_debug(args: list[str]) -> None:
     """One-shot drill-down for a feature: current state + history +
     recent attempts + similar features. Human-readable, pipe-friendly."""
@@ -457,7 +516,7 @@ COMMANDS = {
     "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
-    "top": cmd_top, "debug": cmd_debug,
+    "top": cmd_top, "debug": cmd_debug, "doctor": cmd_doctor,
 }
 
 

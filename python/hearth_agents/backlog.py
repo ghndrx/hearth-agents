@@ -86,6 +86,11 @@ class Feature:
     # check. Use for features known to be expensive (Matrix federation,
     # cross-repo refactors) that shouldn't trip the default budget cap.
     budget_usd: float = 0.0
+    # Free-form operator labels for grouping across kinds (e.g. "q2-launch",
+    # "deprecation-sweep", "tech-debt"). No constraints — operator discipline
+    # only. Kanban filter exposes them so labeled features can be pulled up
+    # together across repos + kinds.
+    labels: list[str] = field(default_factory=list)
 
     def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived
@@ -114,6 +119,7 @@ class Feature:
             "kind": self.kind,
             "risk_tier": self.risk_tier,
             "depends_on": list(self.depends_on),
+            "labels": list(self.labels),
             "repro_command": self.repro_command[:200],
             "acceptance_criteria": self.acceptance_criteria[:400],
             "branch": branch,

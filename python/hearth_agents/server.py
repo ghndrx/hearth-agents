@@ -85,6 +85,9 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             elif field == "repos":
                 if value not in (f.repos or []):
                     return False
+            elif field == "label":
+                if value not in (f.labels or []):
+                    return False
             elif field == "heal_attempts":
                 try:
                     rhs = int(value)
@@ -218,6 +221,9 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         depends_on = payload.get("depends_on") or []
         if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
             raise HTTPException(status_code=400, detail="depends_on must be a list of feature IDs")
+        labels = payload.get("labels") or []
+        if not isinstance(labels, list) or not all(isinstance(l, str) for l in labels):
+            raise HTTPException(status_code=400, detail="labels must be a list of strings")
         feature = Feature(
             id=fid,
             name=name,
@@ -230,6 +236,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             repro_command=(payload.get("repro_command") or "")[:400],
             acceptance_criteria=(payload.get("acceptance_criteria") or "")[:800],
             depends_on=list(depends_on),
+            labels=[str(l).strip()[:40] for l in labels if str(l).strip()],
         )
         if not backlog.add(feature):
             raise HTTPException(status_code=409, detail="feature id or name already exists")

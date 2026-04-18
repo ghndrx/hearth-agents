@@ -174,8 +174,50 @@ def _handle(req: dict) -> None:
         _respond(rid, error={"code": -32601, "message": f"method not found: {method}"})
 
 
+def _main_official_sdk() -> bool:
+    """Try the official Anthropic MCP Python SDK if installed. Returns
+    True when it handled the stdio loop, False when we should fall
+    back to the hand-rolled JSON-RPC implementation below.
+
+    The official SDK handles session lifecycle / sampling / resources
+    more robustly than our minimal loop; prefer it when available.
+    """
+    try:
+        from mcp.server import Server  # type: ignore[import-not-found]
+        from mcp.server.stdio import stdio_server  # type: ignore[import-not-found]
+        import mcp.types as mcp_types  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    import asyncio
+    server = Server("hearth-agents")
+
+    @server.list_tools()
+    async def _list_tools():  # type: ignore[no-untyped-def]
+        return [
+            mcp_types.Tool(name=name, description=schema["description"], inputSchema=schema["inputSchema"])
+            for name, (schema, _) in TOOLS.items()
+        ]
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict):  # type: ignore[no-untyped-def]
+        if name not in TOOLS:
+            return [mcp_types.TextContent(type="text", text=f"unknown tool: {name}")]
+        _, handler = TOOLS[name]
+        out = handler(arguments or {})
+        return [mcp_types.TextContent(type="text", text=json.dumps(out, indent=2)[:20000])]
+
+    async def _run() -> None:
+        async with stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options())
+    asyncio.run(_run())
+    return True
+
+
 def main() -> None:
-    """Stdio loop. Reads one JSON-RPC message per line, writes one per response."""
+    """Stdio loop. Prefer the official MCP SDK when available; fall
+    back to the hand-rolled JSON-RPC implementation when not."""
+    if _main_official_sdk():
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:
