@@ -289,7 +289,12 @@ KANBAN_HTML = r"""<!doctype html>
               <td class="py-2 pr-3 text-right tabular-nums text-blocked" x-text="v.terminal_blocked"></td>
               <td class="py-2 pr-3 text-right font-semibold tabular-nums"
                   :class="v.done_rate >= 0.75 ? 'text-done' : v.done_rate < 0.5 ? 'text-blocked' : ''">
-                <span x-text="(v.done_rate * 100).toFixed(1) + '%'"></span>
+                <div class="flex items-center gap-2 justify-end">
+                  <div class="w-16 h-1.5 rounded-full bg-blocked/20 overflow-hidden" :title="(v.done_rate * 100).toFixed(1) + '% done'">
+                    <div class="h-full" :class="v.done_rate >= 0.75 ? 'bg-done' : v.done_rate < 0.5 ? 'bg-blocked' : 'bg-high'" :style="'width:' + (v.done_rate * 100) + '%'"></div>
+                  </div>
+                  <span x-text="(v.done_rate * 100).toFixed(1) + '%'"></span>
+                </div>
                 <span x-show="v.low_confidence" class="text-[9px] text-muted ml-1">(n&lt;10)</span>
               </td>
               <td class="py-2 text-muted">

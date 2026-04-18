@@ -306,6 +306,39 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_debug(args: list[str]) -> None:
+    """One-shot drill-down for a feature: current state + history +
+    recent attempts + similar features. Human-readable, pipe-friendly."""
+    if not args:
+        print("usage: hearth debug <feature_id>", file=sys.stderr); sys.exit(2)
+    fid = args[0]
+    print(f"=== {fid} ===\n")
+    h = _req("GET", f"/features/{urllib.parse.quote(fid)}/history")
+    f = h.get("feature") or {}
+    if not f:
+        print(f"(not found)"); return
+    print(f"status={f.get('status')} kind={f.get('kind')} priority={f.get('priority')} "
+          f"heal={f.get('heal_attempts')}/3 risk={f.get('risk_tier','low')}")
+    if f.get("depends_on"):
+        print(f"depends_on: {', '.join(f['depends_on'])}")
+    if f.get("heal_hint"):
+        print(f"hint: {f['heal_hint'][:300]}")
+    print(f"name: {f.get('name','')}")
+    print(f"description: {(f.get('description') or '')[:300]}")
+    print(f"\n--- transitions (last 8 of {len(h.get('transitions',[]))}) ---")
+    for t in (h.get("transitions") or [])[-8:]:
+        print(f"  {t.get('ts')} {t.get('from','-')} → {t.get('to')} [{t.get('actor','?')}] {(t.get('reason','') or '')[:60]}")
+    print(f"\n--- attempts ---")
+    attempts = _req("GET", f"/features/{urllib.parse.quote(fid)}/attempts", params={"limit": 10})
+    for a in attempts:
+        dur = a.get("duration_sec") or 0
+        print(f"  #{a.get('attempt')} [{a.get('provider','?')}] {a.get('input_tokens',0)}in/{a.get('output_tokens',0)}out · {dur}s · {len(a.get('tool_calls') or [])} tool calls")
+    print(f"\n--- similar ---")
+    sim = _req("GET", f"/features/{urllib.parse.quote(fid)}/similar", params={"limit": 5})
+    for s in sim:
+        print(f"  {s.get('similarity',0):.2f}  [{s.get('status','?')}] {s.get('id','?')}: {s.get('name','')[:60]}")
+
+
 def cmd_top(args: list[str]) -> None:
     """Live htop-style dashboard: backlog stats, active workers with
     beat age + last error, today's spend + block-rate, updated every
@@ -424,7 +457,7 @@ COMMANDS = {
     "forecast": cmd_forecast, "dashboard": cmd_dashboard, "synth": cmd_synth,
     "export": cmd_export, "search": cmd_search, "build": cmd_build, "bulk": cmd_bulk,
     "read-only": cmd_read_only, "validate": cmd_validate, "watch": cmd_watch,
-    "top": cmd_top,
+    "top": cmd_top, "debug": cmd_debug,
 }
 
 

@@ -282,6 +282,29 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         no frontend/ directory; Alpine.js via CDN does the rendering."""
         return HTMLResponse(KANBAN_HTML)
 
+    @app.get("/events/replay")
+    async def events_replay(from_ts: str, limit: int = 500) -> list[dict[str, Any]]:
+        """Return transitions with ts >= from_ts. SSE clients that drop
+        should reconnect, read their last received ts from the stream,
+        and call this to backfill the gap. Cap limit at 5000.
+
+        ``from_ts`` must parse as ISO 8601; invalid strings 400."""
+        from .transitions import read_tail
+        try:
+            cutoff = datetime.fromisoformat(from_ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="from_ts must be ISO 8601")
+        capped = max(1, min(limit, 5000))
+        out: list[dict[str, Any]] = []
+        for t in read_tail(limit=20000):
+            ts = t.get("ts", "")
+            try:
+                if datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() >= cutoff:
+                    out.append(t)
+            except ValueError:
+                continue
+        return out[:capped]
+
     @app.get("/events")
     async def events() -> Any:
         """Server-Sent Events stream. Clients (kanban) subscribe and
