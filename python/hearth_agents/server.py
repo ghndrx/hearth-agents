@@ -124,6 +124,43 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         from .prompt_analyzer import analyze
         return analyze()
 
+    @app.get("/repo-analytics")
+    async def repo_analytics() -> dict[str, Any]:
+        """Per-repo done-rate + block cluster. Answers 'is hearth-mobile
+        harder to land than hearth?' — gives signal on whether repo-
+        specific prompt variants would help."""
+        from collections import Counter, defaultdict
+        per_repo_done: Counter[str] = Counter()
+        per_repo_blocked: Counter[str] = Counter()
+        per_repo_reasons: dict[str, Counter[str]] = defaultdict(Counter)
+        per_repo_kind: dict[str, Counter[str]] = defaultdict(Counter)
+        for f in backlog.features:
+            for r in f.repos:
+                per_repo_kind[r][f.kind] += 1
+                if f.status == "done":
+                    per_repo_done[r] += 1
+                elif f.status == "blocked":
+                    per_repo_blocked[r] += 1
+                    key = (f.heal_hint or "(no hint)")[:60].strip().rstrip(":").rstrip(".")
+                    per_repo_reasons[r][key or "(blank)"] += 1
+        repos: list[dict[str, Any]] = []
+        for repo in sorted(set(list(per_repo_done) + list(per_repo_blocked) + list(per_repo_kind))):
+            done = per_repo_done[repo]
+            blocked = per_repo_blocked[repo]
+            total = done + blocked
+            repos.append({
+                "repo": repo,
+                "done": done,
+                "blocked": blocked,
+                "done_rate": round(done / total, 3) if total else 0.0,
+                "kinds": dict(per_repo_kind[repo]),
+                "top_reasons": [
+                    {"reason": r, "count": c}
+                    for r, c in per_repo_reasons[repo].most_common(3)
+                ],
+            })
+        return {"repos": repos}
+
     @app.get("/features/{feature_id}/history")
     async def feature_history(feature_id: str) -> dict[str, Any]:
         """Per-feature transition timeline. Useful for RCA on 'why is
@@ -212,15 +249,22 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         event = request.headers.get("x-github-event", "unknown")
         payload = await request.json()
 
-        # Only PR review comments + issue comments carry actionable context for
-        # the agent today. Everything else is acknowledged and ignored — the
-        # agent decides whether to act on what we forward.
-        if event in ("pull_request_review", "issue_comment"):
-            body = (payload.get("comment") or {}).get("body") or (payload.get("review") or {}).get("body", "")
-            repo = (payload.get("repository") or {}).get("full_name", "?")
-            if body:
+        # PR review / inline review comments / issue comments carry actionable
+        # context. Research #3805 (PR review response loops) prescribes a
+        # STRUCTURED routing: identify which feature the PR maps to, which
+        # file+line the comment references, and prepend that context before
+        # invoking the agent. Generic forwarding degrades to guessing.
+        if event in ("pull_request_review", "pull_request_review_comment", "issue_comment"):
+            from .pr_review import build_structured_prompt, apply_review_to_feature
+            structured = build_structured_prompt(event, payload)
+            if structured:
+                # If the PR maps to one of our feat/<id> branches, the
+                # handler may flip that feature back to pending with a
+                # targeted heal_hint so the next loop pass applies the
+                # suggestion. Orthogonal to calling the agent directly.
+                apply_review_to_feature(backlog, structured)
                 await agent.ainvoke(
-                    {"messages": [{"role": "user", "content": f"GitHub {event} on {repo}: {body}"}]}
+                    {"messages": [{"role": "user", "content": structured["prompt"]}]}
                 )
         elif event == "workflow_run":
             # Live CI ingestion (research #3801): a failing GitHub Actions

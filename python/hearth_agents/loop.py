@@ -529,6 +529,63 @@ def _load_agents_md(feature: Feature) -> str:
     return "\n\n---\n\n".join(blocks) if blocks else ""
 
 
+def _resume_context(feature: Feature) -> str:
+    """If a feature's worktree already has commits or uncommitted work from
+    a prior timed-out session, surface a RESUME block so the agent picks
+    up where the last attempt left off instead of starting from scratch
+    (research #3821 — session-resume patterns).
+
+    Best-effort: failures are silenced; absence of a resume block is fine.
+    """
+    import subprocess
+    from pathlib import Path as _P
+    branch = f"feat/{feature.id}"
+    sections: list[str] = []
+    for repo_name in feature.repos:
+        repo_path = settings.repo_paths.get(repo_name)
+        if not repo_path:
+            continue
+        wt = _P(repo_path).parent / f"worktrees-{_P(repo_path).name}" / branch
+        if not wt.exists():
+            continue
+        try:
+            base = "develop" if repo_name == "hearth" else "main"
+            shortstat = subprocess.run(
+                ["git", "diff", "--shortstat", f"{base}...HEAD"],
+                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip()
+            names = subprocess.run(
+                ["git", "diff", "--name-only", f"{base}...HEAD"],
+                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip().splitlines()
+            uncommitted = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if not shortstat and not uncommitted:
+            continue
+        sections.append(
+            f"- repo: {repo_name} (worktree: {wt})\n"
+            f"    vs {base}: {shortstat or '(no committed diff)'}\n"
+            f"    files touched: {', '.join(names[:8])}{'...' if len(names) > 8 else ''}\n"
+            f"    uncommitted: {'yes' if uncommitted else 'no'}"
+        )
+    if not sections:
+        return ""
+    return (
+        "\n\n⏩ RESUME CONTEXT: a prior attempt left partial work in your "
+        "worktree(s). Your FIRST move should be ``git_status`` on each "
+        "worktree to read the current state, then either continue the "
+        "existing work or explicitly ``git reset --hard origin/BASE`` if "
+        "the previous attempt was wrong. Do NOT blindly re-implement; "
+        "reusing a half-finished attempt is cheaper than starting over.\n\n"
+        + "\n".join(sections)
+        + "\n"
+    )
+
+
 def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
     """Build the human message that kicks off the DeepAgent for one feature.
 
@@ -545,6 +602,7 @@ def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
     conventions_block = f"\n\nRepo conventions (from AGENTS.md):\n\n{agents_md}\n" if agents_md else ""
     memory_block = block_for_prompt(list(feature.repos))
     memory_prefix = f"\n\nRecent prior work in these repos (for context, don't duplicate):\n\n{memory_block}\n" if memory_block else ""
+    resume_block = _resume_context(feature)
 
     if fixup:
         return f"""Your previous attempt at feature ``{feature.id}`` failed verification.
@@ -558,7 +616,45 @@ failure recurs, report it as blocked rather than looping.
 Target repos: {repos}
 Repo paths:
 {repo_paths}
-{conventions_block}"""
+{resume_block}{conventions_block}"""
+
+    # Bug features run a reproduce-first workflow (research #3803). The
+    # developer must see repro_command fail BEFORE writing any fix code —
+    # otherwise we ship "fixes" that don't actually address the bug.
+    if feature.kind == "bug":
+        accept = feature.acceptance_criteria or "repro_command exits 0 with a new regression test committed"
+        return f"""Fix bug ``{feature.id}``.
+{resume_block}
+Name: {feature.name}
+Priority: {feature.priority}
+Target repos: {repos}
+
+Repo paths on disk:
+{repo_paths}
+
+Symptom / description:
+{feature.description}
+
+Reproduction command (run this FIRST; it MUST fail or the bug report is wrong):
+  {feature.repro_command or '(no repro_command provided — ask the orchestrator to document one before proceeding)'}
+
+Acceptance criterion:
+  {accept}
+
+Bug workflow (follow in order):
+  1. Reproduce: cd to the appropriate worktree; run the repro_command and
+     CONFIRM it fails. If it passes, the bug is already fixed — report
+     ``BLOCKED: cannot reproduce, bug likely stale`` and stop.
+  2. Regression test: write a minimal test that fails for the same reason.
+     Use ``scaffold_test_file`` if the test file doesn't exist yet.
+  3. Fix: edit production code until the repro_command + the new
+     regression test both pass. Keep the fix minimal — no refactoring
+     alongside.
+  4. Self-audit (Phase 4.5 still applies) then commit + push.
+
+Research topics to check wikidelve for first:
+  - {research}
+{memory_prefix}{conventions_block}"""
 
     # heal_hint comes from healer.py — a targeted instruction reflecting the
     # specific verify failure last time. Pasting it at the TOP makes it the
@@ -566,8 +662,9 @@ Repo paths:
     # repeat the same failure mode (the 7/9 'no commits' cluster we saw).
     heal_block = f"\n\n{feature.heal_hint}\n" if feature.heal_hint else ""
 
+    accept_block = f"\nAcceptance criterion: {feature.acceptance_criteria}\n" if feature.acceptance_criteria else ""
     return f"""Implement feature ``{feature.id}``.
-{heal_block}
+{heal_block}{resume_block}
 Name: {feature.name}
 Priority: {feature.priority}
 Discord parity: {feature.discord_parity}
@@ -578,7 +675,7 @@ Repo paths on disk:
 
 Description:
 {feature.description}
-
+{accept_block}
 Research topics to check wikidelve for first:
   - {research}
 

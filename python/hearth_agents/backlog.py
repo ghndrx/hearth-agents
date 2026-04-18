@@ -14,6 +14,7 @@ import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
+Kind = Literal["feature", "bug"]
 
 
 def _norm_name(name: str) -> str:
@@ -55,6 +56,21 @@ class Feature:
     # undercount (>1.5x) as a blocker — catches planner-under-estimation
     # before it burns verifier iterations (research job #3673).
     planner_estimate_lines: int = 0
+    # Work type: "feature" (new capability, default) or "bug" (reproduce a
+    # broken behavior + ship a failing test + fix it). Bug flow uses a
+    # different prompt phase set — reproduce BEFORE planning — because
+    # shipping a fix without a failing regression test is how bugs come
+    # back (research #3803 — bug reproduction and fix loops).
+    kind: Kind = "feature"
+    # For bugs only: the command that reproduces the broken behavior. Agent
+    # MUST see this fail before writing any fix code; the fix is "this
+    # command now exits 0" rather than "I wrote some code".
+    repro_command: str = ""
+    # Human-readable done condition. For features: "login returns JWT on
+    # valid creds". For bugs: "POST /messages no longer 500s when body is
+    # empty; added regression test". Separate from description so the
+    # agent's ACCEPTANCE statement has a concrete target.
+    acceptance_criteria: str = ""
 
     def to_dict(self, updated_at: str | None = None) -> dict:
         """Curated JSON representation for the kanban UI. Includes a derived
@@ -80,6 +96,9 @@ class Feature:
             "self_improvement": self.self_improvement,
             "parent_id": self.parent_id,
             "planner_estimate_lines": self.planner_estimate_lines,
+            "kind": self.kind,
+            "repro_command": self.repro_command[:200],
+            "acceptance_criteria": self.acceptance_criteria[:400],
             "branch": branch,
         }
 
