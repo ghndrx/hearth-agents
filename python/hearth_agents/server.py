@@ -1554,6 +1554,75 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             return {"ok": False, "raw": text[:4000], "error": "planner output didn't parse as JSON"}
         return {"ok": True, "features": parsed.get("features", []), "goal": goal}
 
+    @app.get("/templates")
+    async def templates_list() -> dict[str, Any]:
+        """Return the templates JSON. Empty object when file missing."""
+        import json as _json
+        from pathlib import Path as _P
+        tpath = _P(settings.feature_templates_path)
+        if not tpath.exists():
+            return {}
+        try:
+            return _json.loads(tpath.read_text())
+        except (OSError, _json.JSONDecodeError) as e:
+            raise HTTPException(status_code=500, detail=f"parse failed: {e}")
+
+    @app.put("/templates")
+    async def templates_replace(payload: dict[str, Any]) -> dict[str, Any]:
+        """Overwrite the templates JSON. Each value must be a dict
+        with at least priority + kind (id/name/description supplied
+        at spawn via overrides). Validates minimally; doesn't auto-
+        spawn anything."""
+        import json as _json
+        from pathlib import Path as _P
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="body must be a dict of template_name → skeleton")
+        for name, tpl in payload.items():
+            if not isinstance(tpl, dict):
+                raise HTTPException(status_code=400, detail=f"template '{name}' not an object")
+            for field_name in ("priority", "kind"):
+                if field_name not in tpl:
+                    raise HTTPException(status_code=400, detail=f"template '{name}' missing {field_name}")
+        tpath = _P(settings.feature_templates_path)
+        tpath.parent.mkdir(parents=True, exist_ok=True)
+        tpath.write_text(_json.dumps(payload, indent=2))
+        log.info("templates_replaced", count=len(payload))
+        return {"ok": True, "count": len(payload)}
+
+    @app.get("/debug/tracer")
+    async def debug_tracer() -> dict[str, Any]:
+        """Snapshot of in-flight worker coroutines with stack traces.
+        Use when /health shows workers beating but no features moving
+        — they may be stuck waiting on IO that the watchdog can't see.
+        Output is Python-specific; pipe through a terminal for
+        readable stacks."""
+        import sys as _sys
+        import traceback
+        frames: list[dict[str, Any]] = []
+        try:
+            for t in asyncio.all_tasks():
+                name = t.get_name()
+                if not (name.startswith("Task-") or "worker" in name.lower() or "run_" in name.lower()):
+                    continue
+                coro = t.get_coro()
+                # Best effort frame extraction.
+                stack_txt = ""
+                try:
+                    stack = t.get_stack(limit=8)
+                    stack_txt = "\n".join(traceback.format_list(traceback.extract_stack(stack[0]))) if stack else ""
+                except Exception:  # noqa: BLE001
+                    pass
+                frames.append({
+                    "name": name,
+                    "coro": getattr(coro, "__qualname__", str(coro))[:100],
+                    "done": t.done(),
+                    "cancelled": t.cancelled(),
+                    "stack_snippet": stack_txt[:2000] if stack_txt else "",
+                })
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"tracer failed: {e}")
+        return {"in_flight": len(frames), "tasks": frames[:50]}
+
     @app.post("/features/from-template")
     async def features_from_template(payload: dict[str, Any]) -> dict[str, Any]:
         """Spawn a Feature from a named template. Body:

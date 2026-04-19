@@ -306,6 +306,31 @@ def cmd_validate(args: list[str]) -> None:
         print(f"  {p['id']}: {', '.join(p['issues'])}")
 
 
+def cmd_release_notes(args: list[str]) -> None:
+    """hearth release-notes <from_date> <to_date> — markdown summary
+    of transitions + counts for a date range."""
+    if len(args) < 2:
+        print("usage: hearth release-notes YYYY-MM-DD YYYY-MM-DD", file=sys.stderr); sys.exit(2)
+    d = _req("GET", "/backlog/diff", params={"from_date": args[0], "to_date": args[1]})
+    import datetime as _dt
+    print(f"# Release notes · {args[0]} → {args[1]}\n")
+    print(f"Generated {_dt.datetime.now().isoformat(timespec='seconds')}\n")
+    print(f"- Added: **{d.get('added_count',0)}**")
+    print(f"- Removed: **{d.get('removed_count',0)}**")
+    print(f"- Status-changed: **{d.get('status_changed_count',0)}**\n")
+    shipped = [f for f in d.get("status_changed", []) if f.get("to") == "done"]
+    if shipped:
+        print(f"## Shipped ({len(shipped)})\n")
+        for f in shipped:
+            print(f"- **{f.get('id')}**: {f.get('name','')[:80]}")
+        print()
+    added = d.get("added", [])
+    if added:
+        print(f"## New features added ({len(added)})\n")
+        for f in added[:30]:
+            print(f"- {f.get('id')}: {f.get('name','')[:80]}")
+
+
 def cmd_diff(args: list[str]) -> None:
     """hearth diff <from_date> <to_date> — snapshot diff."""
     if len(args) < 2:
@@ -611,6 +636,7 @@ COMMANDS = {
     "top": cmd_top, "debug": cmd_debug, "doctor": cmd_doctor,
     "labels": cmd_labels, "template": cmd_template, "plan": cmd_plan,
     "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
+    "release-notes": cmd_release_notes,
 }
 
 
