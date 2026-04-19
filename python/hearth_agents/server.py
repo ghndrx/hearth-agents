@@ -51,6 +51,97 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.get("/health/deep")
+    async def health_deep() -> dict[str, Any]:
+        """Full integration probe: exercises external dependencies
+        beyond what /health covers. Each probe returns reachable +
+        elapsed_ms + a short status string. Runs in parallel so the
+        full check completes in ~max(individual timeouts), not the
+        sum."""
+        import time as _t
+        import httpx as _httpx
+        async def _probe(name: str, coro) -> dict:
+            start = _t.time()
+            try:
+                result = await coro
+                return {"name": name, "ok": True, "elapsed_ms": int((_t.time() - start) * 1000), "detail": result}
+            except Exception as e:
+                return {"name": name, "ok": False, "elapsed_ms": int((_t.time() - start) * 1000), "detail": f"{type(e).__name__}: {e}"}
+
+        async def _http_head(url: str, timeout: float = 5.0) -> str:
+            async with _httpx.AsyncClient(timeout=timeout) as c:
+                r = await c.head(url)
+                return f"HTTP {r.status_code}"
+
+        async def _model_ping(tag: str, build: Any) -> str:
+            # Minimal 5-token hello so we verify auth + network + capacity
+            # without burning meaningful budget.
+            m = build()
+            r = await m.ainvoke([{"role": "user", "content": "reply 'ok'"}])
+            content = getattr(r, "content", "") or ""
+            return f"{tag} replied: {content[:30]!r}"
+
+        from .models import build_kimi, build_minimax
+        probes = [
+            _probe("kimi", _model_ping("kimi", build_kimi)),
+            _probe("minimax", _model_ping("minimax", build_minimax)),
+        ]
+        if settings.wikidelve_url:
+            probes.append(_probe("wikidelve", _http_head(settings.wikidelve_url + "/docs")))
+        if settings.github_token:
+            async def _gh() -> str:
+                async with _httpx.AsyncClient(timeout=5.0) as c:
+                    r = await c.get(
+                        "https://api.github.com/user",
+                        headers={"Authorization": f"Bearer {settings.github_token}",
+                                 "Accept": "application/vnd.github+json"},
+                    )
+                    return f"github user HTTP {r.status_code}"
+            probes.append(_probe("github", _gh()))
+        results = await asyncio.gather(*probes)
+        ok_count = sum(1 for r in results if r["ok"])
+        return {
+            "status": "ok" if ok_count == len(results) else "degraded",
+            "probes": results,
+            "ok": ok_count,
+            "total": len(results),
+        }
+
+    @app.get("/simulate/rate-limit")
+    async def simulate_rate_limit() -> dict[str, Any]:
+        """Return what _throttle_for_rate_approach would decide right
+        now for each provider. Lets operators predict whether the next
+        ainvoke will throttle without actually making one. Surfaces
+        RPM/ITPM/OTPM window counts + headroom-to-ceiling ratio."""
+        from .loop import _request_ticks, _input_tokens, _output_tokens
+        window_sec = 5 * 60 * 60
+        out: dict[str, Any] = {}
+        limits = {
+            "RPM": {"primary": settings.minimax_rate_limit, "fallback": settings.minimax_rate_limit},
+            "ITPM": {"primary": 800_000, "fallback": 800_000},
+            "OTPM": {"primary": 150_000, "fallback": 150_000},
+        }
+        logs = {"RPM": _request_ticks, "ITPM": _input_tokens, "OTPM": _output_tokens}
+        for provider in ("primary", "fallback"):
+            dims: dict[str, Any] = {}
+            for dim_name, limit_map in limits.items():
+                entries = logs[dim_name].get(provider, [])
+                limit = limit_map[provider]
+                if dim_name == "RPM":
+                    value = len(entries)
+                else:
+                    value = sum(v for _, v in entries)
+                headroom = 1.0 - (value / limit) if limit else 1.0
+                dims[dim_name] = {
+                    "value": int(value),
+                    "limit": int(limit),
+                    "headroom_ratio": round(headroom, 3),
+                    "would_throttle": headroom <= 0.10 and limit > 0,
+                }
+            out[provider] = dims
+        out["window_sec"] = window_sec
+        return out
+
     @app.get("/metrics")
     async def metrics() -> Any:
         """Prometheus-format exposition of the counters operators

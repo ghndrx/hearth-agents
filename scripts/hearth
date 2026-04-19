@@ -403,6 +403,50 @@ def cmd_plan(args: list[str]) -> None:
     print(f"ok={out.get('ok', 0)}/{out.get('submitted', 0)}")
 
 
+def cmd_plan_and_ship(args: list[str]) -> None:
+    """hearth plan-and-ship "<goal>" [count=5] — plan + queue without prompt.
+    Skips the confirm step in cmd_plan for automation."""
+    if not args:
+        print("usage: hearth plan-and-ship '<goal>' [count=5] [repo=hearth]", file=sys.stderr); sys.exit(2)
+    goal = args[0]
+    count = 5
+    repo = "hearth"
+    for a in args[1:]:
+        if a.startswith("count="): count = int(a.split("=", 1)[1])
+        elif a.startswith("repo="): repo = a.split("=", 1)[1]
+    print(f"planning+shipping {count} features for '{goal[:60]}'... ")
+    r = _req("POST", "/plan", body={"goal": goal, "default_repo": repo, "count": count})
+    if not r.get("ok"):
+        print(f"planner error: {r.get('error','?')}"); sys.exit(1)
+    features = r.get("features", [])
+    out = _req("POST", "/features/bulk", body={"features": features})
+    ok = out.get("ok", 0)
+    failed = out.get("failed", 0)
+    print(f"queued {ok} features, {failed} failed:")
+    for row in out.get("results", []):
+        mark = "✓" if row.get("ok") else "✗"
+        print(f"  {mark} {row.get('id') or '?'}: {row.get('error') or 'queued'}")
+
+
+def cmd_health_deep(args: list[str]) -> None:
+    r = _req("GET", "/health/deep")
+    print(f"status: {r.get('status')}   ok={r.get('ok')}/{r.get('total')}\n")
+    for p in r.get("probes", []):
+        mark = "✓" if p.get("ok") else "✗"
+        print(f"  {mark} {p['name']:10s} {p['elapsed_ms']:5d}ms  {p.get('detail','')}")
+
+
+def cmd_sim(args: list[str]) -> None:
+    """hearth sim — dump rate-limit simulation."""
+    r = _req("GET", "/simulate/rate-limit")
+    for provider in ("primary", "fallback"):
+        dims = r.get(provider, {})
+        print(f"{provider}:")
+        for name, d in dims.items():
+            throttle = " ⚠ WOULD THROTTLE" if d.get("would_throttle") else ""
+            print(f"  {name:5s} {d.get('value',0):6d}/{d.get('limit',0):6d}  headroom={d.get('headroom_ratio',0):.2f}{throttle}")
+
+
 def cmd_labels(args: list[str]) -> None:
     """List every label + per-label counts."""
     d = _req("GET", "/labels")
@@ -637,6 +681,7 @@ COMMANDS = {
     "labels": cmd_labels, "template": cmd_template, "plan": cmd_plan,
     "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
     "release-notes": cmd_release_notes,
+    "plan-and-ship": cmd_plan_and_ship, "health-deep": cmd_health_deep, "sim": cmd_sim,
 }
 
 

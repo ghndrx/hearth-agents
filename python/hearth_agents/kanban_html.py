@@ -619,7 +619,18 @@ function kanban() {
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.key === '/') { e.preventDefault(); document.querySelector('input[type="search"]')?.focus(); }
-        else if (e.key === '?') { alert('/\\tfocus search\\nj/k\\tnavigate\\na\\tapprove\\nr\\tretry\\nn\\tnuke\\nd\\tdebate\\nEsc\\tclear'); }
+        else if (e.key === '?') { alert('/\\tfocus search\\n1-5\\tjump to column\\nj/k\\tnavigate\\na\\tapprove\\nr\\tretry\\nn\\tnuke\\nd\\tdebate\\nf\\tfocus mode\\nEsc\\tclear'); }
+        else if (e.key >= '1' && e.key <= '5') {
+          // Column hotkeys: 1=pending, 2=implementing, 3=blocked, 4=escalated, 5=done.
+          // Selects the first card in that column.
+          const idx = parseInt(e.key, 10) - 1;
+          const col = this.columns[idx];
+          if (!col) return;
+          const list = this.featuresByColumn(col);
+          if (list.length) this.selectedId = list[0].id;
+        } else if (e.key === 'f') {
+          this.focusMode = !this.focusMode;
+        }
         else if (e.key === 'j' || e.key === 'k') {
           const flat = this.columns.flatMap(c => this.featuresByColumn(c).map(f => f.id));
           if (!flat.length) return;
