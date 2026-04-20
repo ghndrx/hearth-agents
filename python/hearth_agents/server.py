@@ -727,6 +727,39 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "healthy": not (missing_in_live or missing_in_projection or status_mismatches),
         }
 
+    @app.get("/audit/export.csv")
+    async def audit_export_csv() -> Any:
+        """CSV dump of every transition for spreadsheet analysis.
+        Columns: ts, feature_id, from, to, reason, actor,
+        prompts_version. Reads the full transitions.jsonl; caller
+        should expect MB-scale output after a long run."""
+        from fastapi.responses import StreamingResponse
+        from .transitions import read_tail
+        import csv
+        import io
+
+        def _stream():
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["ts", "feature_id", "from", "to", "reason", "actor", "prompts_version"])
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate()
+            for t in read_tail(limit=1_000_000):
+                writer.writerow([
+                    t.get("ts", ""), t.get("feature_id", ""),
+                    t.get("from", "") or "", t.get("to", ""),
+                    (t.get("reason", "") or "")[:200],
+                    t.get("actor", ""), t.get("prompts_version", ""),
+                ])
+                yield buf.getvalue()
+                buf.seek(0); buf.truncate()
+
+        return StreamingResponse(
+            _stream(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=hearth-transitions.csv"},
+        )
+
     @app.get("/backlog/export")
     async def backlog_export() -> list[dict[str, Any]]:
         """Full backlog snapshot as JSON. For migration between instances

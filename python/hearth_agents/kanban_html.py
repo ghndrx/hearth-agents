@@ -155,7 +155,8 @@ KANBAN_HTML = r"""<!doctype html>
         <template x-for="f in featuresByColumn(col).slice(0, 100)" :key="f.id">
           <div class="card-enter bg-bg rounded-md border border-border p-2.5 hover:border-accent/40 transition-colors cursor-pointer"
                :class="multiSelection.has(f.id) ? 'ring-2 ring-done' : (selectedId === f.id ? 'ring-2 ring-accent' : '')"
-               @click="handleCardClick($event, f)">
+               @click="handleCardClick($event, f)"
+               @dblclick="openDrawer(f)">
             <!-- Title row -->
             <div class="flex items-start gap-2 mb-1.5">
               <span class="flex-1 text-[13px] font-medium text-fg truncate" :title="f.name" x-text="f.name"></span>
@@ -262,6 +263,78 @@ KANBAN_HTML = r"""<!doctype html>
 <div class="fixed bottom-2 left-4 text-[10px] text-muted font-mono">
   / search · j/k nav · a approve · r retry · n nuke · d debate · ? help
 </div>
+
+<!-- Detail drawer (opens on card double-click) -->
+<template x-if="drawer">
+  <div @keydown.escape.window="drawer = null">
+    <div class="fixed inset-0 bg-black/60 backdrop-blur-sm z-20" @click="drawer = null"></div>
+    <div class="fixed right-0 top-0 bottom-0 w-[480px] glass border-l border-border z-30 p-6 overflow-auto scrollbar-thin shadow-modal">
+      <button class="absolute top-3 right-4 text-xs px-3 py-1.5 rounded border border-border hover:bg-surface" @click="drawer = null">close</button>
+      <div class="mb-4">
+        <h2 class="text-sm font-semibold" x-text="drawer.name"></h2>
+        <div class="text-[11px] text-muted font-mono mt-1" x-text="drawer.id"></div>
+      </div>
+      <div class="grid grid-cols-[110px_1fr] gap-2 text-xs mb-5">
+        <div class="text-muted">status</div>        <div><span class="px-2 py-0.5 rounded bg-surface border border-border" x-text="drawer.status"></span></div>
+        <div class="text-muted">kind</div>          <div x-text="drawer.kind"></div>
+        <div class="text-muted">priority</div>      <div x-text="drawer.priority"></div>
+        <div class="text-muted">risk</div>          <div x-text="drawer.risk_tier || 'low'"></div>
+        <div class="text-muted">repos</div>         <div x-text="(drawer.repos || []).join(', ')"></div>
+        <template x-if="drawer.labels && drawer.labels.length">
+          <div class="text-muted">labels</div>
+        </template>
+        <template x-if="drawer.labels && drawer.labels.length">
+          <div x-text="(drawer.labels || []).map(l => '#' + l).join(' ')"></div>
+        </template>
+        <template x-if="drawer.depends_on && drawer.depends_on.length">
+          <div class="text-muted">depends_on</div>
+        </template>
+        <template x-if="drawer.depends_on && drawer.depends_on.length">
+          <div x-text="(drawer.depends_on || []).join(', ')"></div>
+        </template>
+        <div class="text-muted">heal</div>          <div x-text="(drawer.heal_attempts || 0) + '/3'"></div>
+        <div class="text-muted">created</div>       <div x-text="drawer.created_at"></div>
+        <div class="text-muted">updated</div>       <div x-text="drawer.updated_at"></div>
+        <template x-if="costByFeature[drawer.id]">
+          <div class="text-muted">spend</div>
+        </template>
+        <template x-if="costByFeature[drawer.id]">
+          <div class="text-done font-mono" x-text="'$' + costByFeature[drawer.id].toFixed(4)"></div>
+        </template>
+      </div>
+      <h3 class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1">Description</h3>
+      <div class="text-xs whitespace-pre-wrap mb-4" x-text="drawer.description"></div>
+      <template x-if="drawer.heal_hint">
+        <div class="mb-4">
+          <h3 class="text-[11px] uppercase tracking-wider text-high font-semibold mb-1">Heal hint</h3>
+          <div class="text-xs whitespace-pre-wrap text-high bg-high/10 border-l-2 border-high p-2 rounded-r" x-text="drawer.heal_hint"></div>
+        </div>
+      </template>
+      <template x-if="drawer.acceptance_criteria">
+        <div class="mb-4">
+          <h3 class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1">Acceptance</h3>
+          <div class="text-xs" x-text="drawer.acceptance_criteria"></div>
+        </div>
+      </template>
+      <template x-if="drawer.repro_command">
+        <div class="mb-4">
+          <h3 class="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1">Repro</h3>
+          <code class="text-xs font-mono bg-bg border border-border rounded p-2 block" x-text="drawer.repro_command"></code>
+        </div>
+      </template>
+      <div class="flex flex-wrap gap-2 pt-3 border-t border-border">
+        <a class="text-xs px-3 py-1.5 rounded border border-border hover:bg-surface" :href="'/replay/' + encodeURIComponent(drawer.id)" target="_blank">replay JSON</a>
+        <a class="text-xs px-3 py-1.5 rounded border border-border hover:bg-surface" :href="ghBranchUrl(drawer)" target="_blank">GitHub branch</a>
+        <template x-if="drawer.status === 'blocked'">
+          <button class="text-xs px-3 py-1.5 rounded bg-done/20 text-done" @click="act(drawer.id, 'approve'); drawer = null">approve</button>
+        </template>
+        <template x-if="drawer.status === 'blocked' || (drawer.heal_attempts || 0) > 0">
+          <button class="text-xs px-3 py-1.5 rounded bg-impl/20 text-impl" @click="act(drawer.id, 'retry'); drawer = null">retry</button>
+        </template>
+      </div>
+    </div>
+  </div>
+</template>
 
 <!-- Multi-select action bar -->
 <div x-show="multiSelection.size > 0"
@@ -552,6 +625,7 @@ function kanban() {
     savedViews: [],
     focusMode: false,
     multiSelection: new Set(),
+    drawer: null,
     selectedId: null,
     toast: '',
     toastErr: false,
@@ -877,6 +951,7 @@ function kanban() {
         this.history[id] = body.transitions || [];
       } catch (e) { this.flash('history fetch failed: ' + e.message, true); }
     },
+    openDrawer(f) { this.drawer = f; },
     handleCardClick(event, f) {
       if (event.shiftKey || event.metaKey || event.ctrlKey) {
         // Multi-select toggle

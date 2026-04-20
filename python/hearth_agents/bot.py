@@ -239,6 +239,42 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
             lines.append(f"  {fid} waits for: {', '.join(unfin)}")
         await msg.answer("\n".join(lines))
 
+    @dp.message(Command("plan"))
+    async def _plan(msg: Message, command: CommandObject) -> None:
+        """Natural-language planner. Usage: /plan <goal>.
+        Shows the draft features and asks for approval via a follow-up
+        /plan-ship message (not automated to avoid accidental batch
+        enqueue from chat)."""
+        goal = (command.args or "").strip()
+        if not goal:
+            await msg.answer("Usage: /plan <goal>\nExample: /plan ship voice channels MVP across hearth + hearth-desktop")
+            return
+        await msg.answer(f"Planning '{goal[:60]}'... ~20s")
+        import urllib.request, json as _json
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{settings.server_port}/plan",
+                data=_json.dumps({"goal": goal}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=45) as r:
+                resp = _json.loads(r.read())
+        except Exception as e:  # noqa: BLE001
+            await msg.answer(f"plan failed: {e}")
+            return
+        if not resp.get("ok"):
+            await msg.answer(f"planner error: {resp.get('error','?')}")
+            return
+        features = resp.get("features", [])
+        lines = [f"📋 {len(features)} draft features for *{goal[:80]}*:"]
+        for i, f in enumerate(features[:10], 1):
+            lines.append(f"\n*{i}. {f.get('id','?')}* ({f.get('priority','?')})")
+            lines.append(f"   {f.get('name','')[:80]}")
+            lines.append(f"   {f.get('description','')[:120]}")
+        lines.append("\nUse `/enqueue` per feature or run `./scripts/hearth plan-and-ship '...'` from the mac to batch-queue.")
+        await msg.answer("\n".join(lines)[:4000])
+
     @dp.message(Command("synth"))
     async def _synth(msg: Message, command: CommandObject) -> None:
         """Run wikidelve_synthesize against an article slug."""
