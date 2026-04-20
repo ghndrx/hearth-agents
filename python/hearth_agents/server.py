@@ -1864,13 +1864,14 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         - loop_workers_max → re-read every autoscaler tick (60s).
         Returns the {field: new_value} pairs that were actually applied.
         """
-        ALLOWED = {
+        ALLOWED: dict[str, tuple] = {
             "max_fixups": (int, 1, 20),
             "per_feature_timeout_sec": (int, 60, 7200),
             "minimax_bias": (float, 0.0, 1.0),
             "loop_workers_max": (int, 1, 64),
             "loop_autoscale_high_water": (int, 1, 1000),
             "loop_autoscale_low_water": (int, 0, 1000),
+            "product_features_enabled": (bool, False, True),
         }
         applied: dict[str, Any] = {}
         for key, raw in (payload or {}).items():
@@ -1879,10 +1880,10 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
                 continue
             cast, lo, hi = spec
             try:
-                val = cast(raw)
+                val = cast(raw) if cast is not bool else str(raw).lower() in ("1", "true", "yes", "on")
             except (TypeError, ValueError):
                 continue
-            if not (lo <= val <= hi):
+            if cast is not bool and not (lo <= val <= hi):
                 continue
             setattr(settings, key, val)
             applied[key] = val
@@ -1895,6 +1896,7 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "loop_workers_max": settings.loop_workers_max,
             "loop_autoscale_high_water": settings.loop_autoscale_high_water,
             "loop_autoscale_low_water": settings.loop_autoscale_low_water,
+            "product_features_enabled": settings.product_features_enabled,
         }}
 
     @app.post("/admin/read-only")

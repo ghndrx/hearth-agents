@@ -15,8 +15,23 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --no-dev
 
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Toolchains the agent needs to build+test the target repos:
+#   - Go 1.25 for hearth/backend (go.mod says go 1.25.8)
+#   - Node 20 LTS + npm for hearth-desktop and any TS tests
+#   - git/ca-certs for worktree ops
+#   - curl/xz/build-essential for fetching and installing Go + node-gyp deps
+# Without these, every attempted feature fails on `go build` exit=127,
+# which is why 100% of attempts were timing out before this was added.
+ARG GO_VERSION=1.25.8
+ARG NODE_MAJOR=20
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates curl xz-utils build-essential \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
+        | tar -C /usr/local -xz \
+    && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}" GOPATH=/root/go
 
 # The container runs as root but the bind-mounted /repos are owned by the host
 # user (uid 1000). Without this, git refuses every worktree op with "dubious
