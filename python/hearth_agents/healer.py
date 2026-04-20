@@ -232,13 +232,12 @@ async def run_healer(backlog: Backlog) -> None:
                 healed.append(f"{f.id} (attempt {f.heal_attempts}/{HEAL_MAX_ATTEMPTS})")
                 log.info("healer_reset", id=f.id, attempt=f.heal_attempts, reason=reason[:120])
 
-                # Auto-trigger multi-agent debate when the healer has already
-                # tried once (research #3816). The theory: if a single-model
-                # retry under new hints keeps failing, parallel-diverse models
-                # on the same prompt produces a better output distribution
-                # than sequential-diverse retries. Fire-and-forget HTTP POST
-                # to our own /debate endpoint. Budget-capped per feature.
-                if f.heal_attempts == 2:
+                # Auto-trigger multi-agent debate at the FIRST healer reset
+                # (research #3816). With ample MiniMax Max headroom (15k req/5h)
+                # the cost of running both models in parallel is cheaper than
+                # waiting through more single-model heals. Earlier than the
+                # original heal_attempts==2 because we have quota to burn.
+                if f.heal_attempts == 1:
                     try:
                         import urllib.request
                         from .config import settings as _s
