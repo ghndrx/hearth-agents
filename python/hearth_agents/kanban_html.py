@@ -101,6 +101,12 @@ KANBAN_HTML = r"""<!doctype html>
       <button @click="loadSnapshots()" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">diff</button>
       <button @click="openViews = !openViews" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface">views</button>
       <button @click="focusMode = !focusMode" :class="focusMode ? 'bg-accent/20 text-accent' : ''" class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface" title="Hide done + escalated columns">focus</button>
+      <select x-model="groupBy" class="text-xs bg-bg border border-border rounded-md py-1.5 pl-2.5 pr-8 focus:outline-none focus:border-accent" title="Group cards within columns">
+        <option value="">flat</option>
+        <option value="kind">by kind</option>
+        <option value="label">by label</option>
+        <option value="priority">by priority</option>
+      </select>
       <button :disabled="!blockedFeatures.length" @click="bulkApproveBlocked()"
               class="text-xs px-2.5 py-1.5 rounded-md border border-border hover:bg-surface disabled:opacity-40 disabled:cursor-not-allowed">
         approve blocked
@@ -152,7 +158,13 @@ KANBAN_HTML = r"""<!doctype html>
         <div class="text-[10px] text-muted text-center italic py-1" x-show="featuresByColumn(col).length > 100">
           showing first 100 of <span x-text="featuresByColumn(col).length"></span> — use filter to narrow
         </div>
-        <template x-for="f in featuresByColumn(col).slice(0, 100)" :key="f.id">
+        <!-- Group headers when groupBy is set -->
+        <template x-for="group in groupedFeaturesByColumn(col)" :key="group.name">
+          <div>
+            <template x-if="groupBy">
+              <div class="text-[9px] uppercase tracking-wider text-muted font-semibold mt-1 mb-1 px-1" x-text="group.name + ' · ' + group.items.length"></div>
+            </template>
+            <template x-for="f in group.items.slice(0, 100)" :key="f.id">
           <div class="card-enter bg-bg rounded-md border border-border p-2.5 hover:border-accent/40 transition-colors cursor-pointer"
                :class="multiSelection.has(f.id) ? 'ring-2 ring-done' : (selectedId === f.id ? 'ring-2 ring-accent' : '')"
                @click="handleCardClick($event, f)"
@@ -251,6 +263,8 @@ KANBAN_HTML = r"""<!doctype html>
                 <div x-show="!history[f.id].length" class="italic text-muted/60">no transitions recorded yet</div>
               </div>
             </template>
+          </div>
+        </template>
           </div>
         </template>
         <div class="text-[11px] text-muted text-center py-3 italic" x-show="!featuresByColumn(col).length">nothing here</div>
@@ -624,6 +638,7 @@ function kanban() {
     openViews: false,
     savedViews: [],
     focusMode: false,
+    groupBy: '',
     multiSelection: new Set(),
     drawer: null,
     selectedId: null,
@@ -640,6 +655,20 @@ function kanban() {
     ],
     get blockedFeatures() { return this.features.filter(f => f.status === 'blocked'); },
     get escalatedFeatures() { return this.features.filter(f => f.status === 'blocked' && (f.heal_attempts || 0) >= 3); },
+    groupedFeaturesByColumn(col) {
+      const items = this.featuresByColumn(col);
+      if (!this.groupBy) return [{ name: '', items }];
+      const buckets = {};
+      for (const f of items) {
+        let key;
+        if (this.groupBy === 'kind') key = f.kind || '?';
+        else if (this.groupBy === 'priority') key = f.priority || '?';
+        else if (this.groupBy === 'label') key = (f.labels && f.labels[0]) || '(no label)';
+        else key = '?';
+        (buckets[key] = buckets[key] || []).push(f);
+      }
+      return Object.entries(buckets).sort().map(([name, items]) => ({ name, items }));
+    },
     get visibleColumns() {
       if (!this.focusMode) return this.columns;
       return this.columns.filter(c => ['pending', 'implementing', 'blocked'].includes(c.key));

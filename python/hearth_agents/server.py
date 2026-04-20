@@ -1820,6 +1820,23 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         ]
         return {"nodes": nodes, "edges": edges}
 
+    @app.post("/admin/compact")
+    async def admin_compact() -> dict[str, Any]:
+        """Operator-triggered maintenance pass: archive done-features
+        older than 7d, take a fresh snapshot, compact transitions.jsonl.
+        Equivalent to the three nightly tasks running one cycle each
+        but without waiting for their schedule."""
+        from .snapshot_task import _snapshot_once
+        from .transition_compaction import _compact_once
+        archived = backlog.archive_old_done(max_age_days=7)
+        _snapshot_once(backlog)
+        compacted = _compact_once()
+        return {
+            "ok": True,
+            "archived_features": archived,
+            "compacted_transitions": compacted,
+        }
+
     @app.post("/admin/replay-repair")
     async def admin_replay_repair(payload: dict[str, Any]) -> dict[str, Any]:
         """One-shot: call /backlog/repair (dry_run first, then real

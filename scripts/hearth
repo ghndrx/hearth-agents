@@ -436,6 +436,18 @@ def cmd_health_deep(args: list[str]) -> None:
         print(f"  {mark} {p['name']:10s} {p['elapsed_ms']:5d}ms  {p.get('detail','')}")
 
 
+def cmd_stats_json(args: list[str]) -> None:
+    """Dump /stats as raw JSON for scripting (jq/etc)."""
+    d = _req("GET", "/stats")
+    print(json.dumps(d, indent=2))
+
+
+def cmd_compact(args: list[str]) -> None:
+    """Trigger one-shot backlog maintenance: archive + snapshot + compact."""
+    r = _req("POST", "/admin/compact")
+    print(f"archived: {r.get('archived_features')}  compacted: {r.get('compacted_transitions')}")
+
+
 def cmd_sim(args: list[str]) -> None:
     """hearth sim — dump rate-limit simulation."""
     r = _req("GET", "/simulate/rate-limit")
@@ -682,6 +694,7 @@ COMMANDS = {
     "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
     "release-notes": cmd_release_notes,
     "plan-and-ship": cmd_plan_and_ship, "health-deep": cmd_health_deep, "sim": cmd_sim,
+    "stats-json": cmd_stats_json, "compact": cmd_compact,
 }
 
 

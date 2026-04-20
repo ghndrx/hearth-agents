@@ -275,6 +275,42 @@ def build_dispatcher(backlog: Backlog, agent: Any) -> Dispatcher:
         lines.append("\nUse `/enqueue` per feature or run `./scripts/hearth plan-and-ship '...'` from the mac to batch-queue.")
         await msg.answer("\n".join(lines)[:4000])
 
+    @dp.message(Command("drawer"))
+    async def _drawer(msg: Message, command: CommandObject) -> None:
+        """ASCII feature detail equivalent of the kanban drawer."""
+        fid = (command.args or "").strip()
+        if not fid:
+            await msg.answer("Usage: /drawer <feature_id>")
+            return
+        f = next((x for x in backlog.features if x.id == fid), None)
+        if f is None:
+            await msg.answer(f"Feature {fid} not found.")
+            return
+        lines = [
+            f"*{fid}*",
+            f"_{f.name}_",
+            "",
+            f"status={f.status} kind={f.kind} priority={f.priority} risk={f.risk_tier}",
+            f"repos: {', '.join(f.repos)}",
+        ]
+        if f.labels:
+            lines.append(f"labels: {', '.join('#' + l for l in f.labels)}")
+        if f.depends_on:
+            lines.append(f"depends_on: {', '.join(f.depends_on)}")
+        lines.append(f"heal: {f.heal_attempts}/3")
+        lines.append("")
+        lines.append("*Description*")
+        lines.append((f.description or "")[:800])
+        if f.heal_hint:
+            lines.append("\n*Heal hint*")
+            lines.append(f.heal_hint[:800])
+        if f.acceptance_criteria:
+            lines.append("\n*Acceptance*")
+            lines.append(f.acceptance_criteria[:400])
+        if f.repro_command:
+            lines.append(f"\n*Repro*: `{f.repro_command[:200]}`")
+        await msg.answer("\n".join(lines)[:4000])
+
     @dp.message(Command("synth"))
     async def _synth(msg: Message, command: CommandObject) -> None:
         """Run wikidelve_synthesize against an article slug."""
