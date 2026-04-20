@@ -264,13 +264,27 @@ def git_commit(repo_path: str, message: str, add_all: bool = True, push: bool = 
 
 @tool
 def git_branch_create(repo_path: str, branch: str, from_ref: str = "develop") -> str:
-    """Create (or switch to) a feature branch.
+    """Create (or switch to) a feature branch in a WORKTREE path, never a primary repo.
+
+    Refuses to ``git checkout -B`` inside a primary repo — doing so moves the
+    primary off its base branch and leaks uncommitted feature cruft into
+    every subsequent worker that cds into it. Use ``git_worktree_add`` for
+    feature work; this tool is only useful inside an existing worktree.
 
     Args:
-        repo_path: Absolute path to the repo.
+        repo_path: Absolute path to a worktree (NOT a primary repo).
         branch: New branch name, e.g. ``feat/matrix-federation``.
         from_ref: Base branch, default ``develop``.
     """
+    from ..config import settings
+    primaries = {str(Path(p).resolve()) for p in settings.repo_paths.values()}
+    if str(Path(repo_path).resolve()) in primaries:
+        return (
+            "error: git_branch_create refuses to mutate a primary repo. "
+            "Use ``git_worktree_add(repo_path, branch, from_ref)`` to get "
+            "an isolated worktree for feature work. Primary repos stay on "
+            "their base branch so other workers see a clean tree."
+        )
     code, out = _run(["git", "checkout", "-B", branch, from_ref], cwd=repo_path, timeout=15)
     return out if code == 0 else f"branch create failed: {out}"
 

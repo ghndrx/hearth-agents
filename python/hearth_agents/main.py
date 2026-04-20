@@ -41,7 +41,46 @@ async def _serve(app) -> None:  # type: ignore[no-untyped-def]
     await uvicorn.Server(config).serve()
 
 
+def _normalize_primary_repos() -> None:
+    """Reset each primary repo to its base branch on a clean tree.
+
+    Rationale: tools like ``git_branch_create`` used to checkout feature
+    branches in the primary repo, leaving untracked files (e.g. a stale
+    ``internal/matrixfederation/`` directory from an abandoned run) that
+    then broke ``go build`` for every other worker that cd'd into the
+    primary. Now guarded at the tool level, but existing state still
+    needs cleanup. Runs once per process start; best-effort — skip if
+    git fetch fails (offline dev) rather than block boot.
+    """
+    import subprocess
+    for repo_name, repo_path in settings.repo_paths.items():
+        try:
+            subprocess.run(
+                ["git", "-C", repo_path, "fetch", "origin", "develop", "--depth", "1"],
+                capture_output=True, timeout=15, check=False,
+            )
+            subprocess.run(
+                ["git", "-C", repo_path, "checkout", "develop"],
+                capture_output=True, timeout=10, check=False,
+            )
+            subprocess.run(
+                ["git", "-C", repo_path, "reset", "--hard", "origin/develop"],
+                capture_output=True, timeout=10, check=False,
+            )
+            # Purge untracked cruft left behind by aborted feature runs. Scoped
+            # to the primary only; worktrees under /repos/worktrees-* are not
+            # touched because `-C repo_path` stays inside the primary repo.
+            subprocess.run(
+                ["git", "-C", repo_path, "clean", "-fd"],
+                capture_output=True, timeout=10, check=False,
+            )
+            log.info("primary_repo_normalized", repo=repo_name, path=repo_path)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("primary_repo_normalize_failed", repo=repo_name, error=str(e)[:200])
+
+
 async def _main() -> None:
+    _normalize_primary_repos()
     backlog = Backlog(settings.backlog_path)
     agent = build_agent()
     # Build the fallback eagerly so the first 429 doesn't pay model-init latency
