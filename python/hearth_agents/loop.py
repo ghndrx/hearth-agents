@@ -1587,6 +1587,17 @@ async def _worker(
         # there's no fallback configured, alt_agent is None and run_once
         # stays on the same model throughout its retries (old behavior).
         alt = fallback_agent if not use_fallback else agent
+        # ...but if the alt provider is currently cooled (rate-limited or
+        # circuit-open), pass alt_agent=None — half the cross-model retry
+        # attempts would otherwise route to a guaranteed-failed provider,
+        # burning the fixup budget. Better to spend all retries on the
+        # healthy provider than waste half on the cooled one.
+        if alt is not None:
+            # When use_fallback=True, active=MiniMax and alt=Kimi (primary).
+            # When use_fallback=False, active=Kimi and alt=MiniMax (fallback).
+            alt_cooled = primary_cool if use_fallback else fallback_cool
+            if alt_cooled:
+                alt = None
         did_work = await run_once(
             active_agent,
             backlog,
