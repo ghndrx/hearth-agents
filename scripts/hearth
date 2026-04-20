@@ -51,6 +51,15 @@ def cmd_status(args: list[str]) -> None:
     d = _req("GET", "/stats")
     print(f"backlog: {d['stats']}")
     print(f"recent_24h: done={d['recent_24h']['done']} blocked={d['recent_24h']['blocked']}")
+    rl = d.get("rate_limit") or {}
+    cb = (d.get("circuit_breaker") or {}).get("per_provider") or {}
+    for prov, label in (("primary", "Kimi"), ("fallback", "MiniMax")):
+        cd = int(rl.get(f"{prov}_cooldown_sec") or 0)
+        circ = cb.get(prov) or {}
+        if cd > 0:
+            print(f"  ⚠ {label} cooldown: {cd // 60}m{cd % 60}s remaining (rate-limited)")
+        if circ.get("open"):
+            print(f"  🚨 {label} circuit OPEN: {int(circ.get('open_for_sec') or 0) // 60}m remaining (block_rate {circ.get('block_rate', 0):.0%})")
     for r in d.get("block_reasons_top10", [])[:5]:
         print(f"  {r['count']}× {r['reason'][:80]}")
 
