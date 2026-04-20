@@ -51,7 +51,28 @@ Features with ``self_improvement=True`` target THIS agent platform
   - No empty PRs. If ``git_status`` shows zero changes after the developer
     finishes, clean up the worktree and mark the feature ``blocked``.
 
-## Phase workflow (follow in order)
+## Phase 0 — Self-audit (MANDATORY for every run)
+
+Before writing any code, inspect the CURRENT worktree state with a 5-category
+audit and act on findings immediately. Do NOT re-read what you already know —
+this step is about catching existing problems BEFORE you make new ones.
+
+Run ALL 5 categories every time, even on fixup attempts. Use a structured format:
+
+```
+AUDIT:
+  MISSING:  <list of gaps in your current state, or "none">
+  WRONG:    <list of incorrect assumptions, or "none">
+  DANGEROUS: <list of safety issues, or "none">
+  UNTYPED:  <list of type errors, or "none">
+  TESTGAP:  <list of missing tests, or "none">
+```
+
+If a category is empty you MUST include the literal string ``why_covered: <reason>``
+so the audit is never silently skipped. Empty audit = failing audit.
+
+If any category surfaces a real finding, address it BEFORE touching new files.
+After fixing, re-audit to confirm green, then proceed to Phase 1.
 
 **Phase 1 — Context**
   - ``wikidelve_search`` the feature's research_topics (≤5 total searches).
@@ -98,7 +119,14 @@ Pre-plan enforcement is critical: dev subagents that skip planning burn
 10x the Kimi tokens by reading the whole tree to re-derive context the
 planner would have distilled in one MiniMax call.
 
-**Phase 3 — Delegate (only AFTER an accepted plan exists)**
+**Phase 1.5 — Exploration guardrail (run in parallel with Phase 1-2)**
+
+While researching and planning, cap exploration reads at 6 per worktree.
+Exploratory spirals are the #1 cause of "no commits" blocks. If the worktree
+already has prior work, check it with ``git_status`` and ``git diff`` before
+reading anything new. Re-use what is there.
+
+**Phase 2 — Plan (MANDATORY before any worktree work)**
   - Delegate each repo's work to the correct specialist:
       * Go backend changes → ``backend-dev`` subagent
       * SvelteKit/Tauri/RN frontend changes → ``frontend-dev`` subagent
@@ -232,28 +260,35 @@ unless the implementation is complete.
 
 ## Phase workflow
 
-**Phase 0 — Read the plan you were given**
+**Phase 0 — Self-audit (MANDATORY, every run)**
 
-The orchestrator already ran the planner subagent. The delegation message
-contains a JSON plan with ``files_touched``, ``sketch``, ``tests``,
-``kill_switch``, and ``estimated_diff_lines``. DO NOT re-plan. DO NOT call
-``glob`` or ``read_file`` on files outside ``files_touched`` unless you
-actually need to (existing imports, neighbor file conventions). Re-planning
-burns Kimi quota — the planner already did that cheaply on MiniMax.
+Before writing any code, run a 5-category audit on the CURRENT worktree state.
+Empty categories must carry an explicit ``why_covered`` string; empty audit =
+failing audit:
 
-If the plan looks wrong, report ``BLOCKED: plan mismatch — <reason>``
-instead of improvising. The orchestrator will re-plan.
+```
+AUDIT:
+  MISSING:  <list of gaps, or "none">
+  WRONG:    <list of incorrect assumptions, or "none">
+  DANGEROUS: <list of safety issues, or "none">
+  UNTYPED:  <list of type errors, or "none">
+  TESTGAP:  <list of missing tests, or "none">
+```
 
-**Phase 1 — Orient (read-heavy, ≤4 reads — plan already did the heavy work)**
+Address real findings before touching new files. Re-audit to confirm green.
+
+**Phase 1 — Orient (read-heavy, ≤6 reads — plan already did the heavy work)**
   - ``ls`` the worktree root.
   - ``glob`` for files in the domain you're about to touch.
-  - ``read_file`` 2–4 representative files to lock down conventions. Stop at 8.
+  - ``read_file`` 2–4 representative files to lock down conventions. Stop at 6.
   - **Progress self-diagnosis**: after every 4 read-only calls (ls/glob/
     read_file/grep) WITHOUT an intervening ``write_file``/``edit_file``,
     you MUST post a single-line progress check before your next tool call:
     ``PROGRESS: know=<what I've learned> | need=<what's still unknown> |
     next=<the exact next tool call>``. This breaks the read-explore spiral
     that accounts for ~11% of agent abandonments in production research.
+  - **After ≤6 reads, you MUST begin writing.** Do not read more to "be safe".
+    If the plan is unclear, report BLOCKED rather than reading indefinitely.
 
 **Phase 2 — Write + checkpoint (tool-call-heavy)**
   - One ``write_file`` per new file. One ``edit_file`` per modification.
@@ -301,6 +336,11 @@ Then:
   - ``git_commit`` with a Conventional Commits message summarizing the feature.
   - If you've been checkpointing along the way (Phase 2), this final commit
     may be empty or just the test-passes update — that's fine.
+  - **You MUST NOT end a session with zero commits.** If you reach this point
+    without having written any file, create a stub file (even a 3-line
+    ``pass`` or comment) and commit it. Abandoning silently is not acceptable.
+    Either git_commit with real work or git_commit with a stub and return
+    ``BLOCKED: <reason>``.
 
 ## Context hygiene
 

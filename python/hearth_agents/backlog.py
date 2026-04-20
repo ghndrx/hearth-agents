@@ -5,12 +5,11 @@ This is a Python port of the TypeScript backlog. The loop pulls the next
 when its subagents finish implementation.
 """
 
+import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-
-import json
 
 Priority = Literal["critical", "high", "medium", "low"]
 Status = Literal["pending", "researching", "implementing", "reviewing", "done", "blocked"]
@@ -20,6 +19,8 @@ def _norm_name(name: str) -> str:
     """Lowercase + alnum-only. Used for fuzzy dedup: "Auto Retention Policies"
     and "auto-retention-policies" normalize to "autoretentionpolicies"."""
     return "".join(c for c in name.lower() if c.isalnum())
+
+
 Repo = Literal["hearth", "hearth-desktop", "hearth-mobile", "hearth-agents"]
 
 
@@ -33,7 +34,7 @@ class Feature:
     research_topics: list[str] = field(default_factory=list)
     discord_parity: str = ""
     status: Status = "pending"
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     # Self-improvement features bypass normal priority ordering so the agent
     # tunes itself in between product features instead of waiting forever.
     self_improvement: bool = False
@@ -242,9 +243,7 @@ class Backlog:
         if any(f.id == feature.id for f in self.features):
             return False
         norm = _norm_name(feature.name)
-        if norm and any(
-            f.status != "done" and _norm_name(f.name) == norm for f in self.features
-        ):
+        if norm and any(f.status != "done" and _norm_name(f.name) == norm for f in self.features):
             return False
         self.features.append(feature)
         self.save()

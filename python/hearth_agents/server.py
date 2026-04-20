@@ -74,15 +74,17 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         """Operational stats: backlog breakdown, recent velocity, split + heal
         activity, circuit-breaker state. Exists so operators can diagnose
         regressions without log-grepping."""
-        from .loop import _primary_cooldown_until, _fallback_cooldown_until, circuit_state
         import asyncio as _asyncio
         import time as _time
+
+        from .loop import _fallback_cooldown_until, _primary_cooldown_until, circuit_state
 
         now_monotonic = _asyncio.get_event_loop().time()
         now_wall = _time.time()
 
         def _iso_age(iso: str) -> float:
             from datetime import datetime as _dt
+
             try:
                 return now_wall - _dt.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
             except Exception:  # noqa: BLE001
@@ -127,7 +129,9 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         # the agent today. Everything else is acknowledged and ignored — the
         # agent decides whether to act on what we forward.
         if event in ("pull_request_review", "issue_comment"):
-            body = (payload.get("comment") or {}).get("body") or (payload.get("review") or {}).get("body", "")
+            body = (payload.get("comment") or {}).get("body") or (payload.get("review") or {}).get(
+                "body", ""
+            )
             repo = (payload.get("repository") or {}).get("full_name", "?")
             if body:
                 await agent.ainvoke(

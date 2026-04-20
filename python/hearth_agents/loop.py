@@ -8,7 +8,6 @@ features so we don't incinerate the MiniMax quota (4500 req/5hr on Plus).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from typing import Any
 
 from .backlog import Backlog, Feature
@@ -41,6 +40,7 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
     """
     import subprocess
     from pathlib import Path as _P
+
     branch = f"feat/{feature.id}"
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -52,7 +52,11 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
         try:
             status = subprocess.run(
                 ["git", "status", "--porcelain"],
-                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+                cwd=str(wt),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             )
             has_uncommitted = status.returncode == 0 and bool(status.stdout.strip())
             if not has_uncommitted:
@@ -64,33 +68,71 @@ def _rescue_uncommitted_worktrees(feature: Feature) -> None:
             # Scrub build-artifact / dep-cache paths before commit — otherwise
             # rescue can ship 400k-line node_modules diffs that immediately
             # fail the diff-size gate. Same pattern list as git_commit tool.
-            _BLOCKED_DIRS = ("node_modules/", ".pnpm-store/", "dist/", "build/", "target/",
-                             ".next/", ".svelte-kit/", ".venv/", "__pycache__/",
-                             ".pytest_cache/", ".turbo/", "coverage/")
+            _BLOCKED_DIRS = (
+                "node_modules/",
+                ".pnpm-store/",
+                "dist/",
+                "build/",
+                "target/",
+                ".next/",
+                ".svelte-kit/",
+                ".venv/",
+                "__pycache__/",
+                ".pytest_cache/",
+                ".turbo/",
+                "coverage/",
+                ".coverage",
+            )
             # Lock files + debris files: observed 849k-line diffs dominated
             # by pnpm-lock.yaml churn from the agent running pnpm install.
-            _BLOCKED_FILES = ("pnpm-lock.yaml", "package-lock.json", "yarn.lock",
-                              "Cargo.lock", "poetry.lock", "Gemfile.lock", "uv.lock",
-                              "dummy-push-trigger.txt", "dummy-trigger.txt",
-                              "push-trigger.txt")
+            _BLOCKED_FILES = (
+                "pnpm-lock.yaml",
+                "package-lock.json",
+                "yarn.lock",
+                "Cargo.lock",
+                "poetry.lock",
+                "Gemfile.lock",
+                "uv.lock",
+                "dummy-push-trigger.txt",
+                "dummy-trigger.txt",
+                "push-trigger.txt",
+            )
             staged = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
-                cwd=str(wt), capture_output=True, text=True, timeout=10, check=False,
+                cwd=str(wt),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             ).stdout.splitlines()
             for p in staged:
-                if any(sig in p for sig in _BLOCKED_DIRS) or any(p.endswith(f) for f in _BLOCKED_FILES):
-                    subprocess.run(["git", "rm", "--cached", "-r", "--", p],
-                                   cwd=str(wt), timeout=10, check=False)
+                if any(sig in p for sig in _BLOCKED_DIRS) or any(
+                    p.endswith(f) for f in _BLOCKED_FILES
+                ):
+                    subprocess.run(
+                        ["git", "rm", "--cached", "-r", "--", p],
+                        cwd=str(wt),
+                        timeout=10,
+                        check=False,
+                    )
             commit = subprocess.run(
                 ["git", "commit", "-m", f"wip({feature.id}): auto-commit of uncommitted dev work"],
-                cwd=str(wt), capture_output=True, text=True, timeout=15, check=False,
+                cwd=str(wt),
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
             )
             if commit.returncode != 0:
                 log.warning("rescue_commit_failed", feature=feature.id, err=commit.stderr[:200])
                 continue
             push = subprocess.run(
                 ["git", "push", "-u", "origin", "HEAD"],
-                cwd=str(wt), capture_output=True, text=True, timeout=60, check=False,
+                cwd=str(wt),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
             )
             log.info(
                 "rescue_committed",
@@ -111,6 +153,7 @@ def _agent_self_reports_blocked(text: str) -> bool:
     security subagents. This multi-signal check is more defensive.
     """
     import re as _re
+
     low = text.lower()
     # Our prompts teach agents to say ``BLOCKED: <reason>``; catch that first.
     if _re.search(r"\bblocked[:\s]", low):
@@ -133,14 +176,15 @@ def _agent_self_reports_blocked(text: str) -> bool:
             return True
     return False
 
+
 # Circuit breaker: if the block-rate in the last CIRCUIT_WINDOW_SEC exceeds
 # CIRCUIT_BLOCK_THRESHOLD, pause the loop for CIRCUIT_COOLDOWN_SEC. Prevents
 # burning API quota (and flooding Telegram) when something systemic is wrong —
 # e.g. all features are failing because an upstream dependency broke.
-CIRCUIT_WINDOW_SEC = 60 * 60       # evaluate block rate over the last hour
-CIRCUIT_MIN_SAMPLES = 5            # don't trip on tiny samples
-CIRCUIT_BLOCK_THRESHOLD = 0.70     # >70% blocked in window → trip
-CIRCUIT_COOLDOWN_SEC = 30 * 60     # pause this long before resuming
+CIRCUIT_WINDOW_SEC = 60 * 60  # evaluate block rate over the last hour
+CIRCUIT_MIN_SAMPLES = 5  # don't trip on tiny samples
+CIRCUIT_BLOCK_THRESHOLD = 0.70  # >70% blocked in window → trip
+CIRCUIT_COOLDOWN_SEC = 30 * 60  # pause this long before resuming
 
 # Sliding-window log of (wall_time, verdict) for circuit eval. Trimmed in place.
 _verdict_log: list[tuple[float, str]] = []
@@ -149,6 +193,7 @@ _circuit_open_until: float = 0.0
 
 def _record_verdict(verdict: str) -> None:
     import time as _t
+
     now = _t.time()
     _verdict_log.append((now, verdict))
     cutoff = now - CIRCUIT_WINDOW_SEC
@@ -160,6 +205,7 @@ def _check_circuit_breaker() -> bool:
     """Return True if the breaker should be OPEN (loop paused). Also mutates
     ``_circuit_open_until`` to extend a cooldown when tripped fresh."""
     import time as _t
+
     now = _t.time()
     if _circuit_open_until > now:
         return True
@@ -187,12 +233,15 @@ def _check_circuit_breaker() -> bool:
         # synchronous.
         try:
             from .notify import Notifier as _N
+
             _n = _N()
-            asyncio.create_task(_n.send_coalesced(
-                "circuit_breaker",
-                f"🚨 circuit breaker OPEN — block rate {rate:.0%} over "
-                f"{len(_verdict_log)} features, pausing {CIRCUIT_COOLDOWN_SEC // 60}m",
-            ))
+            asyncio.create_task(
+                _n.send_coalesced(
+                    "circuit_breaker",
+                    f"🚨 circuit breaker OPEN — block rate {rate:.0%} over "
+                    f"{len(_verdict_log)} features, pausing {CIRCUIT_COOLDOWN_SEC // 60}m",
+                )
+            )
         except Exception:  # noqa: BLE001
             pass
         return True
@@ -202,6 +251,7 @@ def _check_circuit_breaker() -> bool:
 def circuit_state() -> dict:
     """Snapshot of circuit breaker state. Used by /stats."""
     import time as _t
+
     now = _t.time()
     blocked = sum(1 for _, v in _verdict_log if v == "blocked")
     total = len(_verdict_log)
@@ -212,6 +262,7 @@ def circuit_state() -> dict:
         "window_blocked": blocked,
         "block_rate": round(blocked / total, 2) if total else 0.0,
     }
+
 
 # Per-provider cooldowns. Tracking primary (Kimi) and fallback (MiniMax)
 # separately is what stops the ping-pong: when both hit 429 at once, workers
@@ -237,6 +288,7 @@ def _is_rate_limit_error(e: BaseException) -> bool:
     """
     try:
         from openai import RateLimitError
+
         if isinstance(e, RateLimitError):
             return True
     except ImportError:
@@ -261,12 +313,15 @@ def _retry_after_seconds(e: BaseException) -> float:
             raw = headers.get(key) if hasattr(headers, "get") else None
             if raw:
                 try:
-                    return min(max(float(raw), _RATE_LIMIT_MIN_BACKOFF_SEC), _RATE_LIMIT_MAX_BACKOFF_SEC)
+                    return min(
+                        max(float(raw), _RATE_LIMIT_MIN_BACKOFF_SEC), _RATE_LIMIT_MAX_BACKOFF_SEC
+                    )
                 except (TypeError, ValueError):
                     pass
     # Some providers embed the reset time in the body — best effort string parse.
     msg = str(e)
     import re
+
     m = re.search(r"retry[- ]after[: ]+(\d+)", msg, re.IGNORECASE)
     if m:
         return min(max(float(m.group(1)), _RATE_LIMIT_MIN_BACKOFF_SEC), _RATE_LIMIT_MAX_BACKOFF_SEC)
@@ -290,6 +345,7 @@ def _load_agents_md(feature: Feature) -> str:
     it starts implementing. Missing files are skipped silently.
     """
     from pathlib import Path as _P
+
     blocks: list[str] = []
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -317,9 +373,15 @@ def _feature_prompt(feature: Feature, fixup: str | None = None) -> str:
         f"  {name}: {path}" for name, path in settings.repo_paths.items() if name in feature.repos
     )
     agents_md = _load_agents_md(feature)
-    conventions_block = f"\n\nRepo conventions (from AGENTS.md):\n\n{agents_md}\n" if agents_md else ""
+    conventions_block = (
+        f"\n\nRepo conventions (from AGENTS.md):\n\n{agents_md}\n" if agents_md else ""
+    )
     memory_block = block_for_prompt(list(feature.repos))
-    memory_prefix = f"\n\nRecent prior work in these repos (for context, don't duplicate):\n\n{memory_block}\n" if memory_block else ""
+    memory_prefix = (
+        f"\n\nRecent prior work in these repos (for context, don't duplicate):\n\n{memory_block}\n"
+        if memory_block
+        else ""
+    )
 
     if fixup:
         return f"""Your previous attempt at feature ``{feature.id}`` failed verification.
@@ -442,21 +504,28 @@ async def run_once(
     # without a code push. Still aborts on loop-signature deadlock (same
     # reason twice) so we don't infinitely spin.
     MAX_FIXUPS = settings.max_fixups
-    FIXABLE_PREFIXES = ("tests failed", "diff too large", "committed locally", "complexity too high", "planner_undercount", "no test file in diff")
+    FIXABLE_PREFIXES = (
+        "tests failed",
+        "diff too large",
+        "committed locally",
+        "complexity too high",
+        "planner_undercount",
+        "no test file in diff",
+    )
     # Patterns inside the verifier reason or test output that signal the
     # failure cannot be solved by another attempt — research shows ~90% of
     # retry budget gets wasted on these. Bail to next feature instead of
     # burning the full MAX_FIXUPS budget. Conservative list: only patterns
     # we've actually observed as repeatable failure modes.
     UNSOLVABLE_SIGNALS = (
-        "no such file or directory: 'go'",      # missing toolchain
-        "no such file or directory: 'pnpm'",    # missing toolchain
-        "command not found: cargo",             # missing toolchain
-        "permission denied",                    # filesystem permission
-        "401 unauthorized",                     # external API auth
-        "403 forbidden",                        # external API auth
-        "no space left on device",              # disk full
-        "could not resolve host",               # network
+        "no such file or directory: 'go'",  # missing toolchain
+        "no such file or directory: 'pnpm'",  # missing toolchain
+        "command not found: cargo",  # missing toolchain
+        "permission denied",  # filesystem permission
+        "401 unauthorized",  # external API auth
+        "403 forbidden",  # external API auth
+        "no space left on device",  # disk full
+        "could not resolve host",  # network
     )
 
     try:
@@ -550,7 +619,14 @@ async def run_once(
                 list(feature.repos),
                 f"{feature.name} — {reason}. Priority {feature.priority}.",
             )
-        log.info("feature_end", id=feature.id, verdict=verdict, claimed=claimed, verify=reason, attempts=attempt + 1)
+        log.info(
+            "feature_end",
+            id=feature.id,
+            verdict=verdict,
+            claimed=claimed,
+            verify=reason,
+            attempts=attempt + 1,
+        )
         # Only ping Telegram for successes. Failures get batched by the healer
         # (🩹) and escalations (🚨). Per-feature blocks were the biggest source
         # of noise — they were firing dozens of times per hour while healer
@@ -558,7 +634,7 @@ async def run_once(
         if verdict == "done":
             suffix = "" if attempt == 0 else f" (attempts={attempt + 1})"
             await notifier.send(f"✅ [w{worker_id}] done {feature.id}: {feature.name}{suffix}")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         log.warning("feature_timed_out", id=feature.id, timeout=settings.per_feature_timeout_sec)
         # Rescue BEFORE marking blocked — the timeout may have killed the
         # agent mid-write, leaving real code uncommitted in the worktree.
@@ -643,8 +719,6 @@ async def run_once(
     return True
 
 
-
-
 _pingpong_counter: int = 0
 
 
@@ -673,6 +747,7 @@ async def _worker(
         # providers available.
         if _check_circuit_breaker():
             import time as _t
+
             wait = max(30, int(_circuit_open_until - _t.time()))
             log.info("circuit_breaker_open", worker=worker_id, sleep_sec=wait)
             await asyncio.sleep(min(wait, 120))  # wake periodically to re-eval
@@ -680,9 +755,7 @@ async def _worker(
 
         now = asyncio.get_event_loop().time()
         primary_cool = _primary_cooldown_until > now
-        fallback_cool = (
-            fallback_agent is not None and _fallback_cooldown_until > now
-        )
+        fallback_cool = fallback_agent is not None and _fallback_cooldown_until > now
 
         if primary_cool and (fallback_agent is None or fallback_cool):
             # Nothing to use — sleep until whichever cooldown ends first.

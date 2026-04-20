@@ -15,7 +15,6 @@ from pathlib import Path
 
 from .backlog import Feature
 from .config import settings
-from .logger import log
 
 # Hard cap on net-added lines per feature. Features producing huge diffs from
 # a single prompt are almost always unfocused or hallucinated. Blocking them
@@ -81,9 +80,21 @@ def _complexity_check(worktree: Path, repo_name: str) -> tuple[bool, str]:
         # whole codebase. `git diff --name-only base..HEAD -- *.py` narrows scope.
         try:
             files = subprocess.run(
-                ["git", "-C", str(worktree), "diff", "--name-only", "--diff-filter=AM",
-                 f"main..HEAD", "--", "*.py"],
-                capture_output=True, text=True, timeout=10, check=False,
+                [
+                    "git",
+                    "-C",
+                    str(worktree),
+                    "diff",
+                    "--name-only",
+                    "--diff-filter=AM",
+                    "main..HEAD",
+                    "--",
+                    "*.py",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             ).stdout.splitlines()
         except subprocess.TimeoutExpired:
             return True, "complexity skipped (git diff timeout)"
@@ -92,7 +103,11 @@ def _complexity_check(worktree: Path, repo_name: str) -> tuple[bool, str]:
         try:
             r = subprocess.run(
                 ["radon", "cc", "-s", "-n", "D", *files],
-                cwd=str(worktree), capture_output=True, text=True, timeout=30, check=False,
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return True, "complexity skipped (radon unavailable)"
@@ -106,7 +121,11 @@ def _complexity_check(worktree: Path, repo_name: str) -> tuple[bool, str]:
         try:
             r = subprocess.run(
                 ["gocyclo", "-over", str(MAX_FUNCTION_COMPLEXITY), "backend"],
-                cwd=str(worktree), capture_output=True, text=True, timeout=30, check=False,
+                cwd=str(worktree),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return True, "complexity skipped (gocyclo unavailable)"
@@ -127,7 +146,11 @@ def _run_tests(worktree: Path, repo_name: str) -> tuple[bool, str]:
     """
     # Per-repo: (cwd relative to worktree, env overrides, command)
     commands: dict[str, tuple[str, dict[str, str], list[str]]] = {
-        "hearth-agents": ("python", {"PYTHONPATH": "."}, ["pytest", "tests", "-x", "--tb=short", "-q"]),
+        "hearth-agents": (
+            "python",
+            {"PYTHONPATH": "."},
+            ["pytest", "tests", "-x", "--tb=short", "-q"],
+        ),
         "hearth": ("backend", {}, ["go", "test", "./..."]),
         "hearth-desktop": (".", {}, ["pnpm", "test", "--", "--run"]),
         "hearth-mobile": (".", {}, ["pnpm", "test", "--", "--run"]),
@@ -137,11 +160,17 @@ def _run_tests(worktree: Path, repo_name: str) -> tuple[bool, str]:
         return True, "no test command known"
     subdir, env_overrides, cmd = spec
     import os as _os
+
     env = {**_os.environ, **env_overrides}
     try:
         r = subprocess.run(
-            cmd, cwd=str(worktree / subdir), env=env,
-            capture_output=True, text=True, timeout=300, check=False,
+            cmd,
+            cwd=str(worktree / subdir),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return True, f"tests skipped: {e.__class__.__name__}"
@@ -200,19 +229,19 @@ def _diff_is_prompt_only(worktree: Path, base: str, repo_name: str) -> bool:
 # Heuristics for "this path is a test file" per language. Conservative —
 # we'd rather let an edge-case test through than fabricate a false positive.
 _TEST_FILE_SIGNALS = (
-    "_test.go",         # Go: foo_test.go
-    ".test.ts",         # TS/Svelte: foo.test.ts
+    "_test.go",  # Go: foo_test.go
+    ".test.ts",  # TS/Svelte: foo.test.ts
     ".test.tsx",
     ".test.js",
     ".spec.ts",
     ".spec.tsx",
     ".spec.js",
-    "/tests/",          # Python pytest, Rust integration
+    "/tests/",  # Python pytest, Rust integration
     "/test/",
-    "/__tests__/",      # JS/TS convention
-    "test_",            # Python: tests/test_foo.py
-    "_test.rs",         # Rust: foo_test.rs
-    "_test.py",         # Python alt: foo_test.py
+    "/__tests__/",  # JS/TS convention
+    "test_",  # Python: tests/test_foo.py
+    "_test.rs",  # Rust: foo_test.rs
+    "_test.py",  # Python alt: foo_test.py
 )
 
 
@@ -291,7 +320,9 @@ def verify_changes(feature: Feature) -> tuple[bool, str]:
         # instead of silently chewing to the hard diff cap.
         est = getattr(feature, "planner_estimate_lines", 0)
         if est > 0 and lines > est * UNDERCOUNT_RATIO:
-            undercount.append(f"{repo_name} ({lines} actual vs {est} estimated, {lines/est:.1f}x)")
+            undercount.append(
+                f"{repo_name} ({lines} actual vs {est} estimated, {lines / est:.1f}x)"
+            )
             continue
 
         # Complexity gate: any function with cyclomatic complexity over the

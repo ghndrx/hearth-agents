@@ -12,7 +12,7 @@ from their prior invocations instead of re-queueing the same research.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ def record_job(job_id: str, topic: str) -> None:
     try:
         JOBS_PATH.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "job_id": job_id,
             "topic": topic,
             "status": "queued",
@@ -69,7 +69,7 @@ def mark_complete(job_id: str) -> None:
     for j in jobs:
         if j.get("job_id") == job_id and j.get("status") != "complete":
             j["status"] = "complete"
-            j["completed_ts"] = datetime.now(timezone.utc).isoformat()
+            j["completed_ts"] = datetime.now(UTC).isoformat()
             changed = True
     if not changed:
         return

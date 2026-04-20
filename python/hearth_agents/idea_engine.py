@@ -21,15 +21,15 @@ import httpx
 from .backlog import Backlog, Feature
 from .config import settings
 from .logger import log
-from .models import build_kimi, build_minimax
+from .models import build_minimax
 from .notify import Notifier
 
 IDEA_INTERVAL_SEC = 1800  # normal cadence: 30 minutes between top-ups
-IDEA_RETRY_SEC = 60       # fast retry when last generation added 0 (parse failure / dupes)
-IDEA_LOW_WATER = 15       # keep at least this many product features pending so workers never idle
-IDEA_BATCH = 20           # ask MiniMax for this many ideas per generation
+IDEA_RETRY_SEC = 60  # fast retry when last generation added 0 (parse failure / dupes)
+IDEA_LOW_WATER = 15  # keep at least this many product features pending so workers never idle
+IDEA_BATCH = 20  # ask MiniMax for this many ideas per generation
 WIKIDELVE_HINT_LIMIT = 8  # how many KB titles to feed in as grounding
-REVIEW_MIN_SCORE = 4      # Kimi gate: reject ideas scoring below this on either axis
+REVIEW_MIN_SCORE = 4  # Kimi gate: reject ideas scoring below this on either axis
 
 
 _SYSTEM_PROMPT = """You are a product strategist for Hearth, a self-hosted, federated, open-source \
@@ -95,7 +95,9 @@ async def _wikidelve_hints() -> list[str]:
         return []
     try:
         async with httpx.AsyncClient(base_url=settings.wikidelve_url, timeout=10) as c:
-            r = await c.get("/api/search/hybrid", params={"q": "hearth", "limit": WIKIDELVE_HINT_LIMIT})
+            r = await c.get(
+                "/api/search/hybrid", params={"q": "hearth", "limit": WIKIDELVE_HINT_LIMIT}
+            )
             r.raise_for_status()
             return [a.get("title", "") for a in r.json() if a.get("title")]
     except Exception as e:
@@ -136,7 +138,7 @@ def _parse_ideas(text: str) -> list[dict[str, Any]]:
         text = text.rsplit("```", 1)[0].strip()
     # Slice from first [ to last ] to tolerate any remaining prose
     if "[" in text and "]" in text:
-        text = text[text.index("["): text.rindex("]") + 1]
+        text = text[text.index("[") : text.rindex("]") + 1]
     try:
         data = json.loads(text)
         return data if isinstance(data, list) else []
@@ -190,7 +192,7 @@ def _parse_review(text: str) -> dict[str, Any] | None:
             text = text[4:]
         text = text.rsplit("```", 1)[0].strip()
     if "{" in text and "}" in text:
-        text = text[text.index("{"): text.rindex("}") + 1]
+        text = text[text.index("{") : text.rindex("}") + 1]
     try:
         d = json.loads(text)
         return d if isinstance(d, dict) else None
@@ -201,14 +203,16 @@ def _parse_review(text: str) -> dict[str, Any] | None:
 _VETO_TERMS = ("engine", "system", "wizard", "directory", "portability", "migration", "sync")
 
 
-async def _review_idea(reviewer: Any, idea: dict[str, Any], existing_titles: list[str]) -> tuple[bool, str]:
+async def _review_idea(
+    reviewer: Any, idea: dict[str, Any], existing_titles: list[str]
+) -> tuple[bool, str]:
     """Kimi gate: returns (accept, reason). Fails CLOSED (reject) on reviewer error —
     letting dubious ideas through turned out to be the main source of block storms."""
     # Structural vetoes that don't need the reviewer at all — cheap pre-filter.
     repos = idea.get("repos") or []
     if isinstance(repos, list) and len(repos) > 1:
         return False, f"veto: multi-repo ({len(repos)} repos); must be exactly 1"
-    name_id = f"{idea.get('id','')} {idea.get('name','')}".lower()
+    name_id = f"{idea.get('id', '')} {idea.get('name', '')}".lower()
     for term in _VETO_TERMS:
         if term in name_id:
             return False, f"veto: name contains '{term}' — usually too broad for one sitting"
@@ -220,14 +224,17 @@ async def _review_idea(reviewer: Any, idea: dict[str, Any], existing_titles: lis
         # No reviewer configured → accept (we've passed structural vetos).
         return True, "review-skipped (no reviewer configured)"
     user = (
-        f"Existing backlog titles:\n  - " + "\n  - ".join(existing_titles[-30:]) +
-        f"\n\nProposed idea:\n{json.dumps(idea, indent=2)}"
+        "Existing backlog titles:\n  - "
+        + "\n  - ".join(existing_titles[-30:])
+        + f"\n\nProposed idea:\n{json.dumps(idea, indent=2)}"
     )
     try:
-        resp = await reviewer.ainvoke([
-            {"role": "system", "content": _REVIEWER_PROMPT},
-            {"role": "user", "content": user},
-        ])
+        resp = await reviewer.ainvoke(
+            [
+                {"role": "system", "content": _REVIEWER_PROMPT},
+                {"role": "user", "content": user},
+            ]
+        )
     except Exception as e:
         # Fail CLOSED: reviewer outage shouldn't become a free pass for
         # whatever ideas MiniMax generated. Historically accept-on-error
@@ -249,7 +256,7 @@ async def _review_idea(reviewer: Any, idea: dict[str, Any], existing_titles: lis
         and uniq >= REVIEW_MIN_SCORE
         and scope >= REVIEW_MIN_SCORE
     )
-    return accept, f"impl={impl} uniq={uniq} scope={scope} {parsed.get('reason','')[:120]}"
+    return accept, f"impl={impl} uniq={uniq} scope={scope} {parsed.get('reason', '')[:120]}"
 
 
 async def _generate_once(backlog: Backlog, model: Any, reviewer: Any) -> tuple[int, int]:
@@ -260,10 +267,12 @@ async def _generate_once(backlog: Backlog, model: Any, reviewer: Any) -> tuple[i
     hints = await _wikidelve_hints()
     user = _user_prompt(backlog, hints)
     try:
-        resp = await model.ainvoke([
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ])
+        resp = await model.ainvoke(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ]
+        )
     except Exception as e:
         log.warning("idea_minimax_failed", error=str(e))
         return 0, 0
@@ -294,7 +303,9 @@ async def _generate_once(backlog: Backlog, model: Any, reviewer: Any) -> tuple[i
             id=str(raw["id"]),
             name=str(raw["name"]),
             description=str(raw.get("description", "")),
-            priority=raw.get("priority", "medium") if raw.get("priority") in ("critical", "high", "medium", "low") else "medium",
+            priority=raw.get("priority", "medium")
+            if raw.get("priority") in ("critical", "high", "medium", "low")
+            else "medium",
             repos=repos,
             research_topics=[str(t) for t in raw.get("research_topics", []) if isinstance(t, str)],
             discord_parity=str(raw.get("discord_parity", "")),
@@ -339,8 +350,7 @@ async def run_idea_engine(backlog: Backlog) -> None:
                 continue
 
             pending_product = [
-                f for f in backlog.features
-                if f.status == "pending" and not f.self_improvement
+                f for f in backlog.features if f.status == "pending" and not f.self_improvement
             ]
             sleep_for = IDEA_INTERVAL_SEC
             if len(pending_product) < IDEA_LOW_WATER:

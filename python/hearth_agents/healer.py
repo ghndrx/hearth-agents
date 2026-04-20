@@ -17,12 +17,12 @@ import asyncio
 
 from .backlog import Backlog
 from .logger import log
-from .notify import Notifier
 from .loop import _rescue_uncommitted_worktrees
+from .notify import Notifier
 from .verify import verify_changes
 
 HEAL_INTERVAL_SEC = 300  # scan every 5 minutes
-HEAL_MAX_ATTEMPTS = 3    # after this many resets we stop and escalate
+HEAL_MAX_ATTEMPTS = 3  # after this many resets we stop and escalate
 HEAL_COOLDOWN_SEC = 600  # skip features blocked less than this long — give in-run fixup a chance
 
 
@@ -36,7 +36,9 @@ def _retry_push(feature) -> None:  # type: ignore[no-untyped-def]
     """
     import subprocess
     from pathlib import Path as _P
+
     from .config import settings
+
     branch = f"feat/{feature.id}"
     for repo_name in feature.repos:
         repo_path = settings.repo_paths.get(repo_name)
@@ -48,7 +50,11 @@ def _retry_push(feature) -> None:  # type: ignore[no-untyped-def]
         try:
             r = subprocess.run(
                 ["git", "push", "-u", "origin", "HEAD"],
-                cwd=str(wt), capture_output=True, text=True, timeout=60, check=False,
+                cwd=str(wt),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
             )
             log.info(
                 "healer_push_retry",
@@ -69,12 +75,15 @@ def _hint_for_reason(reason: str) -> str:
     r = reason.lower()
     if "no commits" in r:
         return (
-            "PRIOR FAILURE: you opened a worktree last time and never committed "
-            "anything. Do NOT enter another exploratory read-only spiral. After "
-            "at most 6 reads, start writing with edit_file/write_file. End the "
-            "session with either (a) a real git_commit on the feature branch or "
-            "(b) a single message saying 'BLOCKED: <one concrete blocker>' and "
-            "no commit. Both are acceptable; abandoning silently is not."
+            "CRITICAL DIRECTIVE — ACT NOW:\n"
+            "1. Call write_file to create ONE stub file (even a 3-line placeholder in "
+            "the target repo's worktree path).\n"
+            "2. Call git_commit to commit it on the feature branch.\n"
+            "3. If you cannot write the real implementation, call git_commit NOW "
+            "with whatever you have and exit.\n"
+            "4. You MUST NOT end a session with zero commits. Either git_commit "
+            "or send 'BLOCKED: <one concrete blocker>' — abandoning silently is not.\n"
+            "The worktree for this feature already exists. Use it immediately."
         )
     if "diff too large" in r:
         return (
@@ -107,12 +116,14 @@ def _hint_for_reason(reason: str) -> str:
         # concrete guidance, not generic advice. verify_changes returns
         # "hearth: tests failed: <actual error>" — grab the tail so the agent
         # sees things like "dm.go:251:102: too many arguments" directly.
-        excerpt = reason.split("tests failed:", 1)[-1].strip()[:300] if "tests failed:" in reason else ""
+        excerpt = (
+            reason.split("tests failed:", 1)[-1].strip()[:300] if "tests failed:" in reason else ""
+        )
         detail = f" Failing output excerpt:\n  {excerpt}\n\n" if excerpt else " "
         return (
             "PRIOR FAILURE: the test suite (or compile step) failed last attempt."
-            + detail +
-            "Fix exactly these errors before re-running. Do NOT re-plan the "
+            + detail
+            + "Fix exactly these errors before re-running. Do NOT re-plan the "
             "feature — the code is mostly right; just fix the specific errors "
             "above. After fixing, run the test command and confirm exit=0 "
             "BEFORE the final commit."

@@ -13,7 +13,7 @@ later without changing the consumer interface.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 MEM_DIR = Path("/data/memory")
@@ -29,7 +29,7 @@ def _memfile(repo: str) -> Path:
 def record_done(feature_id: str, feature_name: str, repos: list[str], summary: str) -> None:
     """Append one entry per target repo. Best-effort — never raises."""
     entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "feature_id": feature_id,
         "name": feature_name,
         "summary": summary[:MAX_LINE_LEN],
@@ -70,6 +70,6 @@ def block_for_prompt(repos: list[str], limit: int = RECENT_LIMIT) -> str:
         entries = recent_for_repo(repo, limit=limit)
         if not entries:
             continue
-        lines = [f"- **{e['feature_id']}**: {e.get('summary','')}" for e in entries]
+        lines = [f"- **{e['feature_id']}**: {e.get('summary', '')}" for e in entries]
         sections.append(f"### Recent wins in {repo}\n" + "\n".join(lines))
     return "\n\n".join(sections)
