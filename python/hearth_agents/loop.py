@@ -289,11 +289,12 @@ _fallback_cooldown_until: float = 0.0
 
 
 def _is_rate_limit_error(e: BaseException) -> bool:
-    """Detect Kimi/MiniMax/OpenAI rate-limit errors.
+    """Detect Kimi/MiniMax/OpenAI rate-limit AND quota-exhaustion errors.
 
-    Prefers the typed ``openai.RateLimitError`` (sturdier across SDK versions)
-    and falls back to substring + status-code heuristics for cases where
-    LangChain has rewrapped the original exception.
+    Quota exhaustion ("access_terminated_error", "you've reached your usage
+    limit", "billing cycle") arrives as a 403 not a 429, but we route it
+    through the same cooldown path because the right response is identical:
+    stop calling this provider until the window resets.
     """
     try:
         from openai import RateLimitError
@@ -305,14 +306,25 @@ def _is_rate_limit_error(e: BaseException) -> bool:
     if code == 429:
         return True
     msg = str(e).lower()
-    return "rate_limit_reached" in msg or "rate limit" in msg
+    if "rate_limit_reached" in msg or "rate limit" in msg:
+        return True
+    if "access_terminated_error" in msg or "usage limit" in msg or "billing cycle" in msg:
+        return True
+    return False
 
 
 def _retry_after_seconds(e: BaseException) -> float:
     """Pull a backoff duration from the rate-limit error if the provider
     included one. Falls back to ``_RATE_LIMIT_BACKOFF_SEC`` when nothing
     parseable is found. Capped to avoid bad headers stranding workers for days.
+
+    Quota-exhaustion errors (billing cycle, access_terminated) get the full
+    safety cap (4h) rather than the standard 15min — these are multi-day
+    windows where a short cooldown just means we 403 again immediately.
     """
+    msg_l = str(e).lower()
+    if "access_terminated_error" in msg_l or "usage limit" in msg_l or "billing cycle" in msg_l:
+        return float(_RATE_LIMIT_MAX_BACKOFF_SEC)
     # openai SDK exposes the raw response on the exception in some versions
     response = getattr(e, "response", None)
     if response is not None:
