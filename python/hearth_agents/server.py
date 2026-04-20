@@ -1849,6 +1849,54 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
         real = await backlog_repair({"dry_run": False})
         return {"stage": "applied", "dry_run_result": dry, "apply_result": real}
 
+    @app.post("/admin/config")
+    async def admin_config(payload: dict[str, Any]) -> dict[str, Any]:
+        """Hot-tune a small allow-list of loop dials without restart.
+
+        Accepted keys: ``max_fixups``, ``per_feature_timeout_sec``,
+        ``minimax_bias``, ``loop_workers_max``, ``loop_autoscale_high_water``,
+        ``loop_autoscale_low_water``. All other keys are ignored — explicit
+        allow-list keeps secrets and structural fields out of reach.
+
+        Pydantic settings are mutable, but readers cache differently:
+        - max_fixups, minimax_bias, per_feature_timeout_sec → re-read every
+          worker iteration, so changes take effect on the NEXT feature pickup.
+        - loop_workers_max → re-read every autoscaler tick (60s).
+        Returns the {field: new_value} pairs that were actually applied.
+        """
+        ALLOWED = {
+            "max_fixups": (int, 1, 20),
+            "per_feature_timeout_sec": (int, 60, 7200),
+            "minimax_bias": (float, 0.0, 1.0),
+            "loop_workers_max": (int, 1, 64),
+            "loop_autoscale_high_water": (int, 1, 1000),
+            "loop_autoscale_low_water": (int, 0, 1000),
+        }
+        applied: dict[str, Any] = {}
+        for key, raw in (payload or {}).items():
+            spec = ALLOWED.get(key)
+            if not spec:
+                continue
+            cast, lo, hi = spec
+            try:
+                val = cast(raw)
+            except (TypeError, ValueError):
+                continue
+            if not (lo <= val <= hi):
+                continue
+            setattr(settings, key, val)
+            applied[key] = val
+        if applied:
+            log.info("admin_config_updated", **applied)
+        return {"applied": applied, "current": {
+            "max_fixups": settings.max_fixups,
+            "per_feature_timeout_sec": settings.per_feature_timeout_sec,
+            "minimax_bias": settings.minimax_bias,
+            "loop_workers_max": settings.loop_workers_max,
+            "loop_autoscale_high_water": settings.loop_autoscale_high_water,
+            "loop_autoscale_low_water": settings.loop_autoscale_low_water,
+        }}
+
     @app.post("/admin/read-only")
     async def admin_read_only(payload: dict[str, Any]) -> dict[str, Any]:
         """Toggle loop read-only mode. Body: {"enabled": true|false}.

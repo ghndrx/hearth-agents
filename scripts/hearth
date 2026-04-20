@@ -686,6 +686,30 @@ def cmd_bulk(args: list[str]) -> None:
     print(f"{action}: {ok}/{out.get('count', 0)} ok")
 
 
+def cmd_tune(args: list[str]) -> None:
+    """Hot-tune loop dials without restart. Usage: hearth tune key=val [...]
+    Allowed keys: max_fixups, per_feature_timeout_sec, minimax_bias,
+    loop_workers_max, loop_autoscale_high_water, loop_autoscale_low_water.
+    """
+    if not args:
+        cur = _req("POST", "/admin/config", body={})
+        print("current:")
+        for k, v in cur.get("current", {}).items():
+            print(f"  {k}={v}")
+        return
+    payload: dict = {}
+    for a in args:
+        if "=" not in a:
+            print(f"skip '{a}' (need key=val)", file=sys.stderr); continue
+        k, v = a.split("=", 1)
+        payload[k.strip()] = v.strip()
+    out = _req("POST", "/admin/config", body=payload)
+    print(f"applied: {out.get('applied', {})}")
+    print("current:")
+    for k, v in out.get("current", {}).items():
+        print(f"  {k}={v}")
+
+
 COMMANDS = {
     "status": cmd_status, "features": cmd_features, "show": cmd_show,
     "queue": cmd_queue, "bug": cmd_bug,
@@ -702,6 +726,7 @@ COMMANDS = {
     "labels": cmd_labels, "template": cmd_template, "plan": cmd_plan,
     "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
     "release-notes": cmd_release_notes,
+    "tune": cmd_tune,
     "plan-and-ship": cmd_plan_and_ship, "health-deep": cmd_health_deep, "sim": cmd_sim,
     "stats-json": cmd_stats_json, "compact": cmd_compact,
 }

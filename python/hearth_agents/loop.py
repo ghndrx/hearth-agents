@@ -1663,19 +1663,29 @@ async def _autoscaler(
     Runs every 60s. Idempotent; stays at current size when neither
     condition fires.
     """
-    ceiling = max(1, settings.loop_workers_max or settings.loop_workers)
-    floor = max(1, min(settings.loop_workers_min, ceiling))
-    hi = settings.loop_autoscale_high_water
-    lo = settings.loop_autoscale_low_water
-    if floor == ceiling:
+    # Re-read settings each tick so /admin/config can hot-tune without restart.
+    # Initial check just bails when autoscaling is statically disabled.
+    if max(1, settings.loop_workers_max or settings.loop_workers) == max(1, settings.loop_workers_min):
         return  # autoscaling disabled
     from .heartbeat import beat
     while True:
         beat("autoscaler")
         await asyncio.sleep(60)
+        ceiling = max(1, settings.loop_workers_max or settings.loop_workers)
+        floor = max(1, min(settings.loop_workers_min, ceiling))
+        hi = settings.loop_autoscale_high_water
+        lo = settings.loop_autoscale_low_water
         pending = sum(1 for f in backlog.features if f.status == "pending")
         current = len(worker_tasks)
-        if pending >= hi and current < ceiling:
+        if current > ceiling:
+            # Operator dropped the ceiling via /admin/config — shrink even
+            # under high pending. Otherwise a hot-tune from 15→6 would do
+            # nothing while pending stays above low_water.
+            drop = max(worker_tasks.keys())
+            worker_tasks[drop].cancel()
+            worker_tasks.pop(drop, None)
+            log.info("autoscale_down_ceiling", worker=drop, current=current - 1, ceiling=ceiling)
+        elif pending >= hi and current < ceiling:
             wid = max(worker_tasks.keys(), default=-1) + 1
             worker_tasks[wid] = asyncio.create_task(spawn(wid))
             log.info("autoscale_up", worker=wid, current=current + 1, pending=pending)
