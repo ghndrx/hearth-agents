@@ -1899,6 +1899,35 @@ def build_app(backlog: Backlog, agent: Any) -> FastAPI:
             "product_features_enabled": settings.product_features_enabled,
         }}
 
+    @app.post("/admin/clear-cooldown")
+    async def admin_clear_cooldown(payload: dict[str, Any]) -> dict[str, Any]:
+        """Force-close an open provider cooldown. Body: {"provider": "primary"
+        | "fallback" | "both"}. Use when a false-positive rate-limit trigger
+        has parked a provider for 4h when the provider is actually healthy —
+        observed when the heuristic matched benign agent content.
+
+        Resets ``_primary_cooldown_until`` / ``_fallback_cooldown_until`` to
+        0 in loop.py. The per-provider circuit-breaker (block_rate based) is
+        NOT touched; clear it separately if needed. Returns the state after
+        the reset so the operator can confirm.
+        """
+        target = str(payload.get("provider", "")).strip().lower()
+        if target not in ("primary", "fallback", "both"):
+            raise HTTPException(status_code=400, detail="provider must be primary|fallback|both")
+        from . import loop as _loop
+        cleared: list[str] = []
+        if target in ("primary", "both"):
+            _loop._primary_cooldown_until = 0.0
+            cleared.append("primary")
+        if target in ("fallback", "both"):
+            _loop._fallback_cooldown_until = 0.0
+            cleared.append("fallback")
+        log.info("admin_cooldown_cleared", providers=cleared)
+        return {
+            "cleared": cleared,
+            "state": _loop.circuit_state(),
+        }
+
     @app.post("/admin/read-only")
     async def admin_read_only(payload: dict[str, Any]) -> dict[str, Any]:
         """Toggle loop read-only mode. Body: {"enabled": true|false}.

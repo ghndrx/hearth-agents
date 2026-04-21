@@ -686,6 +686,17 @@ def cmd_bulk(args: list[str]) -> None:
     print(f"{action}: {ok}/{out.get('count', 0)} ok")
 
 
+def _cmd_uncool(args: list[str]) -> None:
+    """hearth uncool [primary|fallback|both]
+    Force-close a provider cooldown. Default 'both'.
+    """
+    target = (args[0] if args else "both").strip().lower()
+    if target not in ("primary", "fallback", "both"):
+        print("usage: hearth uncool [primary|fallback|both]", file=sys.stderr); sys.exit(2)
+    out = _req("POST", "/admin/clear-cooldown", body={"provider": target})
+    print(f"cleared: {out.get('cleared', [])}")
+
+
 def cmd_tune(args: list[str]) -> None:
     """Hot-tune loop dials without restart. Usage: hearth tune key=val [...]
     Allowed keys: max_fixups, per_feature_timeout_sec, minimax_bias,
@@ -727,6 +738,7 @@ COMMANDS = {
     "diff": cmd_diff, "note": cmd_note, "logs": cmd_logs,
     "release-notes": cmd_release_notes,
     "tune": cmd_tune,
+    "uncool": lambda a: _cmd_uncool(a),
     "plan-and-ship": cmd_plan_and_ship, "health-deep": cmd_health_deep, "sim": cmd_sim,
     "stats-json": cmd_stats_json, "compact": cmd_compact,
 }
