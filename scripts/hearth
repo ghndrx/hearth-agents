@@ -51,6 +51,21 @@ def cmd_status(args: list[str]) -> None:
     d = _req("GET", "/stats")
     print(f"backlog: {d['stats']}")
     print(f"recent_24h: done={d['recent_24h']['done']} blocked={d['recent_24h']['blocked']}")
+    # Bias surface: a bias of 1.0 = MiniMax-only (Kimi bypassed); 0.0 = Kimi
+    # only; 0.5 = even. Surfaces silently-applied /admin/config values that
+    # would otherwise be invisible until the operator hits /config directly.
+    try:
+        cfg = _req("GET", "/config") or {}
+        bias = float(((cfg.get("loop") or {}).get("minimax_bias") or 0))
+        if bias >= 0.999:
+            print("  🎯 routing: MiniMax-only (bias=1.0, Kimi bypassed)")
+        elif bias <= 0.001:
+            print("  🎯 routing: Kimi-only (bias=0.0, MiniMax bypassed)")
+        elif abs(bias - 0.5) > 0.05:
+            pct = int(bias * 100)
+            print(f"  🎯 routing: {pct}% MiniMax / {100-pct}% Kimi (bias={bias:.2f})")
+    except Exception:  # noqa: BLE001
+        pass
     rl = d.get("rate_limit") or {}
     cb = (d.get("circuit_breaker") or {}).get("per_provider") or {}
     for prov, label in (("primary", "Kimi"), ("fallback", "MiniMax")):
