@@ -240,8 +240,28 @@ class Backlog:
         return False
 
     def _load(self) -> None:
+        """Load backlog from disk. Falls back to the latest snapshot if the
+        primary file is empty or malformed (e.g. truncated to 0 bytes by a
+        SIGKILL mid-write — observed in prod and caused a 6-hour restart loop).
+        Falls back to ``INITIAL_FEATURES`` if no snapshot is recoverable.
+        """
         assert self._path is not None
-        data = json.loads(self._path.read_text())
+        raw = self._path.read_text().strip()
+        data: list | None = None
+        if raw:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                from .logger import log as _log
+                _log.warning("backlog_load_corrupt", path=str(self._path), error=str(e)[:200])
+        if data is None:
+            data = self._load_from_snapshot()
+        if data is None:
+            # Last resort: keep the seeded INITIAL_FEATURES set by __init__.
+            # The container boots cleanly instead of crash-looping.
+            from .logger import log as _log
+            _log.error("backlog_load_no_recovery", path=str(self._path))
+            return
         self.features = [Feature(**f) for f in data]
         # Features stuck in transient states from a prior crash/kill should be
         # retried, not abandoned. ``done`` and ``blocked`` are terminal and stay.
@@ -249,10 +269,38 @@ class Backlog:
             if f.status in ("implementing", "reviewing", "researching"):
                 f.status = "pending"
 
+    def _load_from_snapshot(self) -> list | None:
+        """Return the parsed contents of the most recent snapshot JSON in
+        ``<backlog-dir>/backlog-snapshots/``, or None if none usable.
+        """
+        assert self._path is not None
+        snap_dir = self._path.parent / "backlog-snapshots"
+        if not snap_dir.is_dir():
+            return None
+        snaps = sorted(snap_dir.glob("*.json"))
+        for snap in reversed(snaps):  # newest first
+            try:
+                parsed = json.loads(snap.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, list):
+                from .logger import log as _log
+                _log.warning("backlog_restored_from_snapshot", snapshot=snap.name, features=len(parsed))
+                return parsed
+        return None
+
     def save(self) -> None:
-        if self._path:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
+        """Atomic write via tmp + os.replace so a SIGKILL mid-write can't
+        leave a 0-byte backlog.json. On POSIX, os.replace is atomic within
+        the same filesystem; the tmp file lives alongside the target.
+        """
+        if not self._path:
+            return
+        import os as _os
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps([asdict(f) for f in self.features], indent=2))
+        _os.replace(str(tmp), str(self._path))
 
     def next_pending(self) -> Feature | None:
         """Self-improvement features always jump the queue ahead of product
