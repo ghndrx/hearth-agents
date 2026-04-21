@@ -2,6 +2,16 @@ services:
   agent:
     build: ./python
     restart: unless-stopped
+    # Cap JSON log volume. Without this, docker's default json-file driver
+    # retains logs unboundedly. The agent logs every LangChain tool call
+    # verbatim including large tool outputs (file contents, git diffs) —
+    # we've seen multi-gigabyte log files inside days. 5×50m = 250m hard
+    # ceiling per container.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     env_file: .env
     environment:
       BACKLOG_PATH: /data/backlog.json
