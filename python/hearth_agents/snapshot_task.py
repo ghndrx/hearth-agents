@@ -29,18 +29,35 @@ RETENTION_DAYS = int(_os.environ.get("SNAPSHOT_RETENTION_DAYS", "30"))
 
 
 async def run_snapshot(backlog: Backlog) -> None:
-    """Background task. Runs every 24h; never raises externally."""
+    """Background task. Snapshots on boot, then every 24h; never raises
+    externally.
+
+    Boot-time snapshot matters more than it looks: if the container restart
+    cycles faster than SNAPSHOT_INTERVAL_SEC (as happens during bursts of
+    rapid deploys), the pre-sleep version of this loop would go many days
+    without writing a snapshot. Then when backlog.json gets corrupted
+    mid-write there's no recent restore point. Observed in prod: 2-day
+    snapshot gap led to 113 features unrecoverable after a SIGKILL
+    truncated backlog.json to 0 bytes.
+    """
     from .heartbeat import beat
-    beat("snapshot")  # mark alive before initial sleep
-    await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
+    beat("snapshot")
+    # Boot snapshot is idempotent within a day (see _snapshot_once), so
+    # restart storms don't multiply writes — they just keep today's file
+    # fresh. Runs before the first sleep so we always have today's copy.
+    try:
+        _snapshot_once(backlog)
+        _prune_old()
+    except Exception as e:  # noqa: BLE001
+        log.warning("snapshot_boot_failed", err=str(e)[:200])
     while True:
+        await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
         beat("snapshot")
         try:
             _snapshot_once(backlog)
             _prune_old()
         except Exception as e:  # noqa: BLE001
             log.warning("snapshot_failed", err=str(e)[:200])
-        await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
 
 
 def _snapshot_once(backlog: Backlog) -> None:
