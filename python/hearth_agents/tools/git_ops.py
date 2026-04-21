@@ -57,7 +57,18 @@ def git_status(repo_path: str) -> str:
     )
     if bcode != 0 or not branch.strip().startswith("feat/"):
         return status
-    base = "develop" if "/hearth/" in repo_path or repo_path.endswith("/hearth") else "main"
+    # Base-branch detection: hearth uses 'develop', other repos use 'main'.
+    # Worktree paths are /repos/worktrees-hearth/feat/<name> — the old
+    # "/hearth/" substring check missed them (they contain "worktrees-
+    # hearth", not "/hearth/"). Match both primary (/repos/hearth...) and
+    # worktree (/repos/worktrees-hearth/...) layouts. Excludes hearth-
+    # desktop, hearth-mobile, hearth-agents whose repo names merely start
+    # with 'hearth' but use 'main'.
+    is_hearth_repo = (
+        "/repos/hearth/" in f"{repo_path}/"
+        or "/repos/worktrees-hearth/" in f"{repo_path}/"
+    )
+    base = "develop" if is_hearth_repo else "main"
     dcode, dout = _run(
         ["git", "diff", "--shortstat", f"{base}...HEAD"], cwd=repo_path, timeout=10
     )
