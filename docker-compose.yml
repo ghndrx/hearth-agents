@@ -8,6 +8,12 @@ services:
       HEARTH_REPO_PATH: /repos/hearth
       HEARTH_DESKTOP_PATH: /repos/hearth-desktop
       HEARTH_MOBILE_PATH: /repos/hearth-mobile
+      # Override Tailscale-hostname WIKIDELVE_URL (from .env) with an
+      # in-cluster URL so the agent doesn't need a Tailscale client to
+      # reach the knowledge-base API. Relies on the external
+      # wikidelve_default network join below. env block takes precedence
+      # over env_file entries so this wins.
+      WIKIDELVE_URL: ${WIKIDELVE_URL_OVERRIDE:-http://kb-service:8888}
     volumes:
       - agent-data:/data
       - ${REPOS_DIR:-./repos}:/repos
@@ -24,6 +30,9 @@ services:
     depends_on:
       langfuse-web:
         condition: service_started
+    networks:
+      - default
+      - wikidelve_default
 
   # ── Langfuse self-host ─────────────────────────────────────────────────────
   # Two-service Langfuse v2 stack (web + postgres). Keeps all LLM traces
@@ -65,3 +74,13 @@ services:
 volumes:
   agent-data:
   langfuse-postgres-data:
+
+networks:
+  # Wikidelve's compose stack defines this network; we join as external so
+  # the agent can reach kb-service by container name. Created by whoever
+  # runs `docker compose up` in the wikidelve repo first — if wikidelve
+  # isn't deployed on this host the compose up here will fail with a
+  # clear 'network not found' error rather than silently masking the
+  # dependency.
+  wikidelve_default:
+    external: true
